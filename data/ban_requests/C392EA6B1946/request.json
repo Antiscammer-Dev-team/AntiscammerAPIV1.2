@@ -1,0 +1,19 @@
+{
+  "case_id": "C392EA6B1946",
+  "created_at": "2026-01-20T06:58:34.054580+00:00",
+  "user_id": "1094928459031130232",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: ***Please Submit this Question/Issue here***\n\n> **>\u260e\ufe0f<ht\n> tp\n> \n> :////\\\\@209\n> .74\n> .86\n> .12\\#Tlck3ting>**",
+  "proof_file": "proof.png",
+  "proof_original_name": "41f6871d44f6f5da.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-20T17:06:04.101418+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "case_id": "5066D86F43B3",
+  "created_at": "2026-01-16T19:52:29.564853+00:00",
+  "user_id": "1376692395017506927",
+  "reason": "Scam",
+  "notes": "Notes",
+  "proof_file": "proof.png",
+  "proof_original_name": "image.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-16T19:53:33.583299+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified scam"
+  }
+}

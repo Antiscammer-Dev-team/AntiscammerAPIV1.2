@@ -1,0 +1,19 @@
+{
+  "case_id": "8B05C77CC41E",
+  "created_at": "2026-01-27T22:14:53.047667+00:00",
+  "user_id": "1095201256093519953",
+  "reason": "Attempted support scam",
+  "notes": "",
+  "proof_file": "proof.png",
+  "proof_original_name": "RJLffHC.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-27T22:15:21.062657+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified support scam bot"
+  }
+}

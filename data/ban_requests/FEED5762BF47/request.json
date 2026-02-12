@@ -1,0 +1,19 @@
+{
+  "case_id": "FEED5762BF47",
+  "created_at": "2026-02-01T13:56:47.478682+00:00",
+  "user_id": "1465336749696876544",
+  "reason": "Free money scam. Found with spam",
+  "notes": "",
+  "proof_file": "proof.png",
+  "proof_original_name": "MrjadYk.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-02-01T14:04:50.408669+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified scam"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "case_id": "BE614B864ED4",
+  "created_at": "2026-01-21T12:30:57.748455+00:00",
+  "user_id": "1095201256093519953",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: Submit your questions / Issues  below\n\n>\u2028http://stackreports.github.io/Stack/",
+  "proof_file": "proof.png",
+  "proof_original_name": "380937fb52e5a833.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora Dev"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-21T12:33:08.275539+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified scam"
+  }
+}

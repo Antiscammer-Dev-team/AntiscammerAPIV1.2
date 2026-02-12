@@ -1,0 +1,19 @@
+{
+  "case_id": "E1AD9513C0A4",
+  "created_at": "2026-02-03T13:09:03.267108+00:00",
+  "user_id": "1357122043543421012",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: Reach out to Team here \n\n\n[   <dI\ns\nCo\nrd:/#\n@%64\n%\n69%73%\n63\n%6F%72%64%2\ne%67%67/complaint\n>   ]",
+  "proof_file": "proof.png",
+  "proof_original_name": "e5a5322a90333998.png",
+  "reporter_meta": {
+    "expires_at": "2026-05-28T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-02-06T20:12:19.322758+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified scam"
+  }
+}

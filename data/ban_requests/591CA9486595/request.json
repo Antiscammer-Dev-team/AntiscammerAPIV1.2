@@ -1,0 +1,19 @@
+{
+  "case_id": "591CA9486595",
+  "created_at": "2026-02-03T13:07:56.570074+00:00",
+  "user_id": "1465264316617068737",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: We\u2019ve partnered with OpenSea for a new free  Mint! Users in this server are invited to join.\n\n\ud83d\ude80 You have a chance to be selected, so make sure to participate https://nft-giftboxe-one.vercel.app/. as soon as possible.\nSome claims may require gas!",
+  "proof_file": "proof.png",
+  "proof_original_name": "41c523a6c5b85cb0.png",
+  "reporter_meta": {
+    "expires_at": "2026-05-28T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-02-03T13:12:07.069169+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified scam"
+  }
+}

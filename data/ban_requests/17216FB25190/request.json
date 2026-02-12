@@ -1,0 +1,19 @@
+{
+  "case_id": "17216FB25190",
+  "created_at": "2026-01-15T19:28:45.718264+00:00",
+  "user_id": "958097870563725352",
+  "reason": "Ticketsystem Scam",
+  "notes": "See my ticket proof",
+  "proof_file": "proof.png",
+  "proof_original_name": "image.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-15T19:31:00.699731+00:00",
+    "reviewed_by": "dev workstation",
+    "decision": "User clearly displayed trying to scam"
+  }
+}

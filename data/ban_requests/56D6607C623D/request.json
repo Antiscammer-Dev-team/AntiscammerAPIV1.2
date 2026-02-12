@@ -1,0 +1,19 @@
+{
+  "case_id": "56D6607C623D",
+  "created_at": "2026-01-20T16:06:51.245671+00:00",
+  "user_id": "1451523243545464892",
+  "reason": "IP Puller",
+  "notes": "",
+  "proof_file": "proof.png",
+  "proof_original_name": "image.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-20T16:44:42.139459+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Extra evidence had to be pulled. User was found mass sending a 2no.co domain in a server. That domain was traced back to iplogger via googling the root domain. Looking into redirect user was attempting to pull ip as going to final domain only shows a black image."
+  }
+}

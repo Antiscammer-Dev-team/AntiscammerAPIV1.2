@@ -1,0 +1,33 @@
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.eggs
+*.egg
+
+# Virtual env
+venv
+.venv
+env
+
+# Git
+.git
+.gitignore
+
+# IDE / OS
+.idea
+.vscode
+*.swp
+.DS_Store
+Thumbs.db
+
+# Exclude data - mount as volume in Coolify for persistence
+# (optional: remove this line if you want data baked into image)
+data/
+
+# Archives
+*.tar.gz
+*.zip

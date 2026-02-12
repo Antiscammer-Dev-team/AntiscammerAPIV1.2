@@ -1,0 +1,19 @@
+{
+  "case_id": "95A62BF9C7E7",
+  "created_at": "2026-02-02T01:09:41.022092+00:00",
+  "user_id": "1290652492622987298",
+  "reason": "Attempted to send user to 3 party for \"Support\"",
+  "notes": "",
+  "proof_file": "proof.png",
+  "proof_original_name": "QV76phI.png",
+  "reporter_meta": {
+    "expires_at": "2026-05-28T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-02-02T01:12:14.351405+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified support scam. user attempted to send someone to a support server unsolicitated."
+  }
+}

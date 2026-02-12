@@ -1,0 +1,19 @@
+{
+  "case_id": "06108A05EC9C",
+  "created_at": "2026-01-28T18:24:02.213911+00:00",
+  "user_id": "650165601041383434",
+  "reason": "scam and use of leaked scripts",
+  "notes": "Reported by user in ticket",
+  "proof_file": "proof.png",
+  "proof_original_name": "image.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "rejected",
+  "review": {
+    "reviewed_at": "2026-02-01T14:11:51.339400+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "While you claim this user scammed. WE need evidence directly from either a DM or some other source to verify legitness. Please resend the report with evidence"
+  }
+}

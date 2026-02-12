@@ -1,0 +1,19 @@
+{
+  "case_id": "BE676070F512",
+  "created_at": "2026-01-18T07:53:04.305958+00:00",
+  "user_id": "1029928049971572766",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: Proceed for clarification and guidance        \n[**# |support-t!cket**](discord:%64%69%73%63%6F%72%64%2E%67%67/c%6F%6D%70%6C%61%69%6E%73\n) <@370278848820019201>",
+  "proof_file": "proof.png",
+  "proof_original_name": "970458294357cd6f.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-18T07:53:48.051083+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified support scam redirectiong to \"Open a ticket\" Server"
+  }
+}

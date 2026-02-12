@@ -1,0 +1,19 @@
+{
+  "case_id": "EA45920A13D6",
+  "created_at": "2026-01-15T19:51:39.025819+00:00",
+  "user_id": "845962340087496706",
+  "reason": "Scam",
+  "notes": "Already known",
+  "proof_file": "proof.png",
+  "proof_original_name": "Pa2jmQr.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-15T19:56:14.449150+00:00",
+    "reviewed_by": "dev workstation",
+    "decision": "Support scam visible"
+  }
+}

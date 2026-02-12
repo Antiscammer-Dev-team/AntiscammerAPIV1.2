@@ -1,0 +1,19 @@
+{
+  "case_id": "8F1D7CA69D71",
+  "created_at": "2026-01-17T11:31:58.598651+00:00",
+  "user_id": "1404329167537049712",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: ==========================\n*Share your questions / Issues using the url below*\n\n[   **<mA\ni\nlt\no:/#@%\n64\n%69%73%63%6F%72%64%2E%67%67/\n%37%78%47%68%71%39%7A%35%32%67>**   ]",
+  "proof_file": "proof.png",
+  "proof_original_name": "692e57fd75f61393.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-17T17:16:40.504357+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Clear attempt at sending support questions to alt server"
+  }
+}

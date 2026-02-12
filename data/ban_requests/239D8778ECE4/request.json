@@ -1,0 +1,19 @@
+{
+  "case_id": "239D8778ECE4",
+  "created_at": "2026-02-07T00:24:33.935558+00:00",
+  "user_id": "1295578178915401780",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1415963000665280602\nGuild Name: Modora | Moderation & Fun\nDetected Message: Name: Sophia\nGender: F\nAge: 22\nCountry: Currently studying in Hamburg, but originally from Cleveland, Ohio.  \n\nIf you're from the USA , Canada or Germany and interested in texting with an older woman (whether you're a guy or a girl but +18 and above ), she pays really well. If you're interested, send me a DM saying \"I'm interested.\"",
+  "proof_file": "proof.png",
+  "proof_original_name": "b1695058198c205b.png",
+  "reporter_meta": {
+    "expires_at": "2026-05-28T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-02-12T02:14:52.367137+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Proof shows user offering \"Older woman \" for a fee. Legit scam"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "case_id": "C9939C767EC0",
+  "created_at": "2026-01-17T18:54:44.459381+00:00",
+  "user_id": "1372638432412827771",
+  "reason": "test",
+  "notes": "test",
+  "proof_file": "proof.png",
+  "proof_original_name": "m-white.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "rejected",
+  "review": {
+    "reviewed_at": "2026-01-17T19:12:09.888133+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Test"
+  }
+}

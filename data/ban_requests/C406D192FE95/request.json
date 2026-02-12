@@ -1,0 +1,19 @@
+{
+  "case_id": "C406D192FE95",
+  "created_at": "2026-01-17T15:12:15.964793+00:00",
+  "user_id": "1084208972719984795",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: **\nOP\u2028EN A TI\u2028CK\u2028ET **\n\n> **>\u2028<\n> \n> ht\n> \n> tp\n> \n> ://bu\n> gs\n> reports\u3002\n> github\u3002\n> io\\bugsreports>**",
+  "proof_file": "proof.jpg",
+  "proof_original_name": "b8c641109b2c6ddc.jpg",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-17T17:13:23.098208+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Report clearly desplays a scam"
+  }
+}

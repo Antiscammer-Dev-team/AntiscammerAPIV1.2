@@ -1,0 +1,19 @@
+{
+  "case_id": "F1704E89862C",
+  "created_at": "2026-01-27T12:37:39.108248+00:00",
+  "user_id": "1137814327064264875",
+  "reason": "send dm about support discord",
+  "notes": "reported by customer in a ticket",
+  "proof_file": "proof.png",
+  "proof_original_name": "image.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-02-01T14:10:19.528484+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified and clear support scam. We do ask you please send uncropped images but this works"
+  }
+}

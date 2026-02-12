@@ -1,0 +1,19 @@
+{
+  "case_id": "0297E5239F50",
+  "created_at": "2026-01-20T06:59:24.931807+00:00",
+  "user_id": "1094928459031130232",
+  "reason": "scam_detected",
+  "notes": "Guild ID: 1042987309198483607\nGuild Name: Quasar Store\nDetected Message: <@401509840779870228> Kindly refer to \ud83c\udfab [**`# | Ticket-Support`**](<discord:/#@%64%69%73%63%6f%72%64%2e%67%67/GUnm8g7E>) and open a ticket\n\n\n`\u1d40\u02b0\u1da6\u02e2 \u1d50\u1d49\u02e2\u02e2\u1d43\u1d4d\u1d49 \u02b7\u1da6\u02e1\u02e1 \u1d43\u1d58\u1d57\u1d52\u207b\u1d48\u1d49\u02e1\u1d49\u1d57\u1d49 \u1da6\u207f \u1da0\u1d49\u02b7 \u02e2\u1d49\u1d9c\u1d52\u207f\u1d48\u02e2`",
+  "proof_file": "proof.png",
+  "proof_original_name": "4808688e24987b20.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-20T17:06:19.846468+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified"
+  }
+}

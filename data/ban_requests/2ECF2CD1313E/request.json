@@ -1,0 +1,19 @@
+{
+  "case_id": "2ECF2CD1313E",
+  "created_at": "2026-01-30T12:41:40.810628+00:00",
+  "user_id": "1290652492622987298",
+  "reason": "Support scam - Attempted external support for anything",
+  "notes": "",
+  "proof_file": "proof.png",
+  "proof_original_name": "ii5YLPI.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-30T12:43:31.503687+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified"
+  }
+}

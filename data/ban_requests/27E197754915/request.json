@@ -1,0 +1,19 @@
+{
+  "case_id": "27E197754915",
+  "created_at": "2026-01-30T12:42:46.696208+00:00",
+  "user_id": "963411156024840232",
+  "reason": "Support scam- Attempted to direct users externally",
+  "notes": "",
+  "proof_file": "proof.png",
+  "proof_original_name": "OihJiFD.png",
+  "reporter_meta": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora"
+  },
+  "status": "approved",
+  "review": {
+    "reviewed_at": "2026-01-30T12:43:45.834553+00:00",
+    "reviewed_by": "Antiscammer Review team",
+    "decision": "Verified"
+  }
+}
