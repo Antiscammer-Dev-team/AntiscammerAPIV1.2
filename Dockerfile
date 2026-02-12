@@ -7,12 +7,12 @@ RUN groupadd --gid 1000 appuser \
 
 WORKDIR /app
 
-# Install dependencies
-COPY API/AntiscammerAPIV1.2/requirements.txt .
+# Install dependencies (repo root = AntiscammerAPIV1.2)
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
-COPY API/AntiscammerAPIV1.2/ .
+COPY . .
 
 # Create data directory and set ownership
 RUN mkdir -p data/ban_requests \
