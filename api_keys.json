@@ -1,0 +1,34 @@
+{
+  "ATSM-8R5H-5Z6L-151D": {
+    "expires_at": "2026-05-28T23:59:59Z",
+    "label": "Modora"
+  },
+  "ATSM-C2S4-A2S4-F5S5": {
+    "expires_at": "2026-04-15T23:59:59Z",
+    "label": "draakjekevin"
+  },
+  "ATSM-GLTW-KYPE-B239": {
+    "expires_at": "2026-05-28T23:59:59Z",
+    "label": "Antiscammer Review team"
+  },
+  "ATSM-GLTW-KYPE-B96F": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "SassGuard"
+  },
+  "ATSM-QI5H-CG8M-2065": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "FZ vouch"
+  },
+  "ATSM-YJC4-CDAF-227D": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "Modora Dev"
+  },
+  "Test-key-123-456": {
+    "expires_at": "3072-12-31T23:59:59Z",
+    "label": "test"
+  },
+  "antiscammer-internal-KEY-456": {
+    "expires_at": "2026-06-30T23:59:59Z",
+    "label": "internal service"
+  }
+}

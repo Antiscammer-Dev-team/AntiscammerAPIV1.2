@@ -1,0 +1,15 @@
+{
+    "keys": {
+        "antiscammer-internal-KEY-456": {
+            "users": {
+                "937095746971398166": {
+                    "created_at": "2026-02-10T03:29:15Z",
+                    "enabled": true,
+                    "enabled_at": "2026-02-10T03:34:39Z",
+                    "label": "internal service:937095746971398166",
+                    "secret_base32": "NNKWEMSFGBSVA33GJJFEQX2KL5CESULOKF3UKR3WKY3XQ5JVOVXTMTTRLIZXQ6CVOJBWO"
+                }
+            }
+        }
+    }
+}
