@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create data directory and set ownership
-RUN mkdir -p data/ban_requests \
+RUN mkdir -p data/ban_requests data/false_positive_reports \
     && chown -R appuser:appuser /app
 
 USER appuser

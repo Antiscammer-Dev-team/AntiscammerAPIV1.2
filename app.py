@@ -50,6 +50,8 @@ log = logging.getLogger("app")
 # Config
 # ----------------------------
 DISCORD_WEBHOOK_URL = "https://ptb.discord.com/api/webhooks/1461018711778529438/CtIih5nJmUyHGT_BXwN-LNU4cDPbojcxkr1i7Ri28NBiQ5OE61SVPZ8pWx5vQgUZa0Yi"
+# Separate webhook for false positive reports (set in app or via staff config)
+DISCORD_FALSE_POSITIVE_WEBHOOK_URL = (os.getenv("DISCORD_FALSE_POSITIVE_WEBHOOK_URL") or "").strip()
 
 OLLAMA_BASE_URL = "https://ollama.com/api"
 OLLAMA_API_KEY = "f898de33fc0c4bd594308d8dcb133c4e.YMyG_NSTlypAEst3mTpQrh_f"
@@ -61,6 +63,8 @@ OLLAMA_MODEL = "gpt-oss:20b-cloud"
 SCAMMERS_DB_PATH = Path(__file__).with_name("Scammers.json")
 BANREQ_DIR = Path("data") / "ban_requests"
 BANREQ_DIR.mkdir(parents=True, exist_ok=True)
+FPREQ_DIR = Path("data") / "false_positive_reports"
+FPREQ_DIR.mkdir(parents=True, exist_ok=True)
 
 # 2FA (Google Authenticator/Authy/etc) JSON store
 TWOFA_DB_PATH = Path(__file__).with_name("TwoFA.json")
@@ -440,6 +444,51 @@ async def post_banrequest_to_discord_webhook(
                 if resp.status >= 300:
                     body = await resp.text()
                     log.warning("Webhook post failed: %s %s", resp.status, body[:500])
+
+
+async def post_falsepositivereport_to_discord_webhook(
+    *,
+    case_id: str,
+    uid: str,
+    reason: str,
+    notes: str,
+    proof_bytes: bytes,
+    proof_filename: str,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> None:
+    if not DISCORD_FALSE_POSITIVE_WEBHOOK_URL:
+        return
+
+    content = f"⚠️ **New false positive report** — Case `{case_id}`"
+    embed = {
+        "title": "False Positive Report Submitted",
+        "fields": [
+            {"name": "User ID", "value": f"`{uid}`", "inline": True},
+            {"name": "Reason", "value": reason[:1024] or "(none)", "inline": False},
+            {"name": "Notes", "value": (notes[:1024] if notes else "(none)"), "inline": False},
+        ],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    data = aiohttp.FormData()
+    data.add_field(
+        "payload_json",
+        json.dumps({"content": content, "embeds": [embed]}),
+        content_type="application/json",
+    )
+    data.add_field("file", proof_bytes, filename=proof_filename, content_type="application/octet-stream")
+
+    if session:
+        async with session.post(DISCORD_FALSE_POSITIVE_WEBHOOK_URL, data=data) as resp:
+            if resp.status >= 300:
+                body = await resp.text()
+                log.warning("False positive webhook post failed: %s %s", resp.status, body[:500])
+    else:
+        async with aiohttp.ClientSession() as fallback:
+            async with fallback.post(DISCORD_FALSE_POSITIVE_WEBHOOK_URL, data=data) as resp:
+                if resp.status >= 300:
+                    body = await resp.text()
+                    log.warning("False positive webhook post failed: %s %s", resp.status, body[:500])
 
 async def upload_banreport_proof_to_interna(
     *,
@@ -1311,6 +1360,114 @@ async def detect(req: DetectRequest, request: Request, _meta: dict = Depends(req
 @app.get("/banrequest/{case_id}")
 async def get_banrequest_case(case_id: str, _meta: dict = Depends(require_api_key)):
     case_dir = BANREQ_DIR / case_id.upper()
+    data_path = case_dir / "request.json"
+    if not data_path.exists():
+        raise HTTPException(status_code=404, detail="Case not found")
+    return json.loads(data_path.read_text(encoding="utf-8"))
+
+# ----------------------------
+# False positive report (same flow as ban request)
+# ----------------------------
+@app.post("/falsepositivereport")
+async def false_positive_report(
+    request: Request,
+    user_id: str = Form(...),
+    reason: str = Form(...),
+    notes: str = Form(""),
+    proof: UploadFile = File(...),
+    _meta: dict = Depends(require_api_key),
+):
+    uid = _normalize_user_id(user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    ext = _safe_ext(proof.filename or "")
+    if not ext:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+
+    max_bytes = 10 * 1024 * 1024
+    proof_chunks: List[bytes] = []
+    written = 0
+    while True:
+        chunk = await proof.read(1024 * 1024)
+        if not chunk:
+            break
+        written += len(chunk)
+        if written > max_bytes:
+            raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+        proof_chunks.append(chunk)
+    proof_bytes = b"".join(proof_chunks)
+    proof_filename = proof.filename or f"proof{ext}"
+
+    case_id = uuid.uuid4().hex[:12].upper()
+    case_dir = FPREQ_DIR / case_id
+    case_dir.mkdir(parents=True, exist_ok=True)
+
+    proof_url = await upload_banreport_proof_to_interna(
+        proof_bytes=proof_bytes,
+        proof_filename=proof_filename,
+        case_id=case_id,
+        session=request.app.state.http_session,
+    )
+
+    record = {
+        "case_id": case_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "user_id": uid,
+        "reason": reason.strip(),
+        "notes": notes.strip(),
+        "proof_original_name": proof.filename,
+        "reporter_meta": _meta,
+        "status": "pending",
+    }
+    if proof_url:
+        record["proof_url"] = proof_url
+
+    (case_dir / "request.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+    await post_falsepositivereport_to_discord_webhook(
+        case_id=case_id,
+        uid=uid,
+        reason=reason.strip(),
+        notes=notes.strip(),
+        proof_bytes=proof_bytes,
+        proof_filename=proof_filename,
+        session=request.app.state.http_session,
+    )
+
+    return {"ok": True, "case_id": case_id}
+
+
+@app.post("/falsepositivereport/{case_id}/resolve")
+async def resolve_falsepositivereport_case(
+    case_id: str,
+    body: ResolveCaseRequest,
+    _meta: dict = Depends(require_api_key),
+):
+    action = body.action.strip().lower()
+    if action not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="action must be approve or reject")
+
+    case_dir = FPREQ_DIR / case_id.upper()
+    data_path = case_dir / "request.json"
+    if not data_path.exists():
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    data["status"] = "approved" if action == "approve" else "rejected"
+    data["review"] = {
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "reviewed_by": _meta.get("label") or "unknown",
+        "decision": body.decision_note.strip() or ("Approved" if action == "approve" else "Rejected"),
+    }
+
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return {"ok": True, "case_id": data["case_id"], "status": data["status"]}
+
+
+@app.get("/falsepositivereport/{case_id}")
+async def get_falsepositivereport_case(case_id: str, _meta: dict = Depends(require_api_key)):
+    case_dir = FPREQ_DIR / case_id.upper()
     data_path = case_dir / "request.json"
     if not data_path.exists():
         raise HTTPException(status_code=404, detail="Case not found")
