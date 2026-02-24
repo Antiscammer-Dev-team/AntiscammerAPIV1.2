@@ -194,7 +194,7 @@ async def api_key_delete(key: str) -> None:
 # ----------------------------
 # Admin auth
 # ----------------------------
-async def \"Admin credentials\"_get(username: str) -> Optional[str]:
+async def admin_auth_get(username: str) -> Optional[str]:
     """Returns password for username or None."""
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -204,7 +204,7 @@ async def \"Admin credentials\"_get(username: str) -> Optional[str]:
     return row["password"] if row else None
 
 
-async def \"Admin credentials\"_set(username: str, password: str) -> None:
+async def admin_auth_set(username: str, password: str) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
