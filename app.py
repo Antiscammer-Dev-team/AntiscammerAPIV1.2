@@ -21,6 +21,7 @@ import pyotp
 from dotenv import load_dotenv
 
 load_dotenv()
+import db
 from fastapi import (
     Depends,
     FastAPI,
@@ -58,25 +59,9 @@ OLLAMA_API_KEY = "f898de33fc0c4bd594308d8dcb133c4e.YMyG_NSTlypAEst3mTpQrh_f"
 OLLAMA_MODEL = "gpt-oss:20b-cloud"
 
 # ----------------------------
-# Paths / Storage
+# Paths / Storage (file-based storage removed; DB used)
 # ----------------------------
-SCAMMERS_DB_PATH = Path(__file__).with_name("Scammers.json")
-BANREQ_DIR = Path("data") / "ban_requests"
-BANREQ_DIR.mkdir(parents=True, exist_ok=True)
-FPREQ_DIR = Path("data") / "false_positive_reports"
-FPREQ_DIR.mkdir(parents=True, exist_ok=True)
-
-# 2FA (Google Authenticator/Authy/etc) JSON store
-TWOFA_DB_PATH = Path(__file__).with_name("TwoFA.json")
 TWOFA_ISSUER = "AntiScammer"
-
-# API keys (managed via admin UI)
-API_KEYS_PATH = Path(__file__).with_name("api_keys.json")
-_API_KEYS_LOCK = asyncio.Lock()
-
-# Admin UI login (user + pass; edit admin_auth.json to change)
-ADMIN_AUTH_PATH = Path(__file__).with_name("admin_auth.json")
-_ADMIN_CREDS: Dict[str, str] = {}  # username -> password (loaded at startup)
 _admin_auth_scheme = HTTPBasic()
 
 # Ban report proof upload — matches Laravel CDNUploadService (CDN expects "files" + X-Internal-Token)
@@ -86,62 +71,9 @@ BAN_REPORT_CDN_USER = (os.getenv("CDN_USERNAME") or "").strip()
 BAN_REPORT_CDN_PASS = (os.getenv("CDN_PASSWORD") or "").strip()
 
 # ----------------------------
-# In-memory caches + locks
+# In-memory cache for scammers (loaded from DB at startup / reload)
 # ----------------------------
-_SCAMMERS_RAW: Dict[str, Any] = {}
 _KNOWN_SCAMMERS: Dict[str, str] = {}  # user_id -> reason
-_DB_LOCK = asyncio.Lock()
-
-_TWOFA_RAW: Dict[str, Any] = {}
-# NEW SHAPE:
-# _TWOFA = {
-#   "<api_key>": { "users": { "<user_id>": {enabled, secret_base32, ...}, ... } }
-# }
-_TWOFA: Dict[str, Dict[str, Any]] = {}
-_TWOFA_LOCK = asyncio.Lock()
-
-# ----------------------------
-# API Keys (with expiry) — loaded from api_keys.json
-# ----------------------------
-API_KEYS: Dict[str, Dict[str, Any]] = {}
-
-def _default_api_keys() -> Dict[str, Dict[str, Any]]:
-    """Default keys used when api_keys.json is missing (first run)."""
-    return {
-        "ATSM-GLTW-KYPE-B239": {"expires_at": "2026-05-28T23:59:59Z", "label": "Antiscammer Review team"},
-        "antiscammer-internal-KEY-456": {"expires_at": "2026-06-30T23:59:59Z", "label": "internal service"},
-        "ATSM-GLTW-KYPE-B96F": {"expires_at": "3072-12-31T23:59:59Z", "label": "SassGuard"},
-        "ATSM-QI5H-CG8M-2065": {"expires_at": "3072-12-31T23:59:59Z", "label": "FZ vouch"},
-        "ATSM-8R5H-5Z6L-151D": {"expires_at": "2026-05-28T23:59:59Z", "label": "Modora"},
-        "ATSM-YJC4-CDAF-227D": {"expires_at": "3072-12-31T23:59:59Z", "label": "Modora Dev"},
-        "Test-key-123-456": {"expires_at": "3072-12-31T23:59:59Z", "label": "test"},
-        "ATSM-C2S4-A2S4-F5S5": {"expires_at": "2026-04-15T23:59:59Z", "label": "draakjekevin"},
-    }
-
-def load_api_keys() -> None:
-    global API_KEYS
-    if not API_KEYS_PATH.exists():
-        API_KEYS = _default_api_keys()
-        save_api_keys_sync()
-        log.info("Created api_keys.json with default keys")
-        return
-    try:
-        data = json.loads(API_KEYS_PATH.read_text(encoding="utf-8"))
-        API_KEYS = data if isinstance(data, dict) else {}
-        log.info("Loaded %d API keys from api_keys.json", len(API_KEYS))
-    except Exception:
-        log.exception("Failed to load API keys, using defaults")
-        API_KEYS = _default_api_keys()
-
-def save_api_keys_sync() -> None:
-    API_KEYS_PATH.write_text(
-        json.dumps(API_KEYS, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-async def save_api_keys_async() -> None:
-    async with _API_KEYS_LOCK:
-        save_api_keys_sync()
 
 # ----------------------------
 # General helpers
@@ -183,7 +115,7 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None, alias=
     if not x_api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
-    meta = API_KEYS.get(x_api_key)
+    meta = await db.api_key_get(x_api_key)
     if not meta:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
@@ -201,32 +133,9 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None, alias=
 
     return meta
 
-def load_admin_auth() -> None:
-    global _ADMIN_CREDS
-    if not ADMIN_AUTH_PATH.exists():
-        _ADMIN_CREDS = {"admin": "changeme"}
-        ADMIN_AUTH_PATH.write_text(
-            json.dumps({"username": "admin", "password": "changeme"}, indent=2),
-            encoding="utf-8",
-        )
-        log.warning("Created admin_auth.json with default admin/changeme — change it!")
-        return
-    try:
-        data = json.loads(ADMIN_AUTH_PATH.read_text(encoding="utf-8"))
-        u = (data.get("username") or "admin").strip()
-        p = (data.get("password") or "").strip()
-        if not u or not p:
-            _ADMIN_CREDS = {"admin": "changeme"}
-            log.warning("admin_auth.json invalid; using admin/changeme")
-        else:
-            _ADMIN_CREDS = {u: p}
-    except Exception:
-        log.exception("Failed to load admin_auth.json")
-        _ADMIN_CREDS = {"admin": "changeme"}
-
-def require_admin_auth(credentials: HTTPBasicCredentials = Depends(_admin_auth_scheme)) -> str:
+async def require_admin_auth(credentials: HTTPBasicCredentials = Depends(_admin_auth_scheme)) -> str:
     """Validate admin username/password; raise 401 if invalid."""
-    p = _ADMIN_CREDS.get(credentials.username)
+    p = await db.admin_auth_get(credentials.username)
     if not p or p != credentials.password:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -254,148 +163,18 @@ def _sanitize_twofa_user_id(user_id: str) -> str:
     uid = re.sub(r"\s+", " ", uid)
     return uid[:128]
 
-def _twofa_get_users_for_key(api_key: str) -> Dict[str, Any]:
-    key_rec = _TWOFA.get(api_key)
-    if not key_rec or not isinstance(key_rec, dict):
-        key_rec = {"users": {}}
-        _TWOFA[api_key] = key_rec
-    users = key_rec.get("users")
-    if not isinstance(users, dict):
-        users = {}
-        key_rec["users"] = users
-    return users
-
-def _twofa_get_user_entry(api_key: str, user_id: str) -> Optional[Dict[str, Any]]:
-    users = _twofa_get_users_for_key(api_key)
-    return users.get(user_id)
-
-def _twofa_set_user_entry(api_key: str, user_id: str, entry: Dict[str, Any]) -> None:
-    users = _twofa_get_users_for_key(api_key)
-    users[user_id] = entry
-
-def _migrate_twofa_shape_inplace() -> bool:
-    """
-    Backward compat:
-    Old shape per key:
-      _TWOFA[api_key] = {enabled, secret_base32, label, ...}
-    New shape:
-      _TWOFA[api_key] = {"users": {"default": {...}}}
-    Returns True if changed.
-    """
-    changed = False
-    for api_key, rec in list(_TWOFA.items()):
-        if not isinstance(rec, dict):
-            _TWOFA[api_key] = {"users": {}}
-            changed = True
-            continue
-
-        if "users" in rec and isinstance(rec.get("users"), dict):
-            continue  # already new
-
-        # looks like old flat entry
-        if "secret_base32" in rec or "enabled" in rec:
-            default_user = rec.get("user_id") or "default"
-            default_user = _sanitize_twofa_user_id(str(default_user))
-            _TWOFA[api_key] = {"users": {default_user: rec}}
-            changed = True
-        else:
-            # unknown record -> normalize
-            _TWOFA[api_key] = {"users": {}}
-            changed = True
-
-    return changed
-
-def load_twofa_db() -> None:
-    global _TWOFA_RAW, _TWOFA
-    if not TWOFA_DB_PATH.exists():
-        _TWOFA_RAW = {"keys": {}}
-        _TWOFA = {}
-        return
-    try:
-        _TWOFA_RAW = json.loads(TWOFA_DB_PATH.read_text(encoding="utf-8")) or {}
-        ks = _TWOFA_RAW.get("keys", {})
-        _TWOFA = ks if isinstance(ks, dict) else {}
-
-        # migrate old shape to new on load
-        if _migrate_twofa_shape_inplace():
-            log.info("TwoFA.json migrated to per-user shape")
-    except Exception:
-        log.exception("Failed to load TwoFA DB")
-        _TWOFA_RAW = {"keys": {}}
-        _TWOFA = {}
-
-def _twofa_file_write_with_lock() -> None:
-    """Write TwoFA.json under a file lock so only one writer at a time (e.g. multi-process safe)."""
-    lock_path = TWOFA_DB_PATH.with_suffix(TWOFA_DB_PATH.suffix + ".lock")
-    import time as _time
-    deadline = _time.monotonic() + 15.0
-    while _time.monotonic() < deadline:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            try:
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                fd = -1
-                _TWOFA_RAW["keys"] = _TWOFA
-                TWOFA_DB_PATH.write_text(
-                    json.dumps(_TWOFA_RAW, ensure_ascii=False, indent=4, sort_keys=True),
-                    encoding="utf-8",
-                )
-                return
-            finally:
-                if fd >= 0:
-                    try:
-                        os.close(fd)
-                    except Exception:
-                        pass
-                try:
-                    lock_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            return
-        except FileExistsError:
-            _time.sleep(0.05)
-            continue
-    raise RuntimeError("Could not acquire TwoFA.json write lock within 15s")
-
-async def save_twofa_db() -> None:
-    async with _TWOFA_LOCK:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _twofa_file_write_with_lock)
 
 # ----------------------------
-# Scammers DB
+# Scammers (loaded from DB into cache)
 # ----------------------------
-def load_scammers_db() -> None:
-    global _SCAMMERS_RAW, _KNOWN_SCAMMERS
-    if not SCAMMERS_DB_PATH.exists():
-        _SCAMMERS_RAW = {"known_scammers": {}}
-        _KNOWN_SCAMMERS = {}
-        return
+async def load_scammers_db() -> None:
+    global _KNOWN_SCAMMERS
     try:
-        _SCAMMERS_RAW = json.loads(SCAMMERS_DB_PATH.read_text(encoding="utf-8")) or {}
-        ks = _SCAMMERS_RAW.get("known_scammers", _SCAMMERS_RAW)
-        if not isinstance(ks, dict):
-            ks = {}
-
-        clean: Dict[str, str] = {}
-        for k, v in ks.items():
-            nk = _normalize_user_id(str(k).strip())
-            if not nk:
-                continue
-            clean[nk] = str(v).strip()
-
-        _KNOWN_SCAMMERS = clean
-        _SCAMMERS_RAW["known_scammers"] = _KNOWN_SCAMMERS
-        log.info("Loaded %d known scammers", len(_KNOWN_SCAMMERS))
+        _KNOWN_SCAMMERS = await db.scammers_get_all()
+        log.info("Loaded %d known scammers from DB", len(_KNOWN_SCAMMERS))
     except Exception:
-        log.exception("Failed to load scammers DB")
-        _SCAMMERS_RAW = {"known_scammers": {}}
+        log.exception("Failed to load scammers from DB")
         _KNOWN_SCAMMERS = {}
-
-async def save_scammers_db() -> None:
-    # Scammers.json is read-only on this server; it is updated externally and synced via secure transport.
-    log.debug("save_scammers_db skipped (Scammers.json is managed externally)")
 
 # ----------------------------
 # Discord webhook helper
@@ -833,31 +612,31 @@ class TwoFACodeRequest(BaseModel):
 # ----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: load API keys, admin auth, DBs, and create shared HTTP session
-    load_api_keys()
-    load_admin_auth()
-    load_scammers_db()
-    load_twofa_db()
-    await save_twofa_db()
-    log.info("LOAD PID=%s scammers_loaded=%d api_keys=%d", os.getpid(), len(_KNOWN_SCAMMERS), len(API_KEYS))
-    log.info("2FA keys loaded=%d", len(_TWOFA))
+    # Startup: init DB pool, tables, seed defaults, load scammers cache, HTTP session
+    pool = await db.init_pool()
+    await db.init_tables(pool)
+    await db.seed_defaults(pool)
+    await load_scammers_db()
+    api_keys_count = len(await db.api_key_get_all())
+    log.info("LOAD PID=%s scammers_loaded=%d api_keys=%d", os.getpid(), len(_KNOWN_SCAMMERS), api_keys_count)
     timeout = aiohttp.ClientTimeout(total=20)
     app.state.http_session = aiohttp.ClientSession(timeout=timeout)
     try:
         yield
     finally:
         await app.state.http_session.close()
+        await db.close_pool()
         log.info("HTTP session closed")
 
 app = FastAPI(title="AntiScammer Local API (Keyed)", lifespan=lifespan)
 log.info("API booting...")
 
-def _caller_label(request: Request) -> str:
+async def _caller_label(request: Request) -> str:
     """Resolve API key to label for logging (no_key, invalid_key, or label)."""
     key = request.headers.get("X-API-Key")
     if not key:
         return "no_key"
-    meta = API_KEYS.get(key)
+    meta = await db.api_key_get(key)
     if not meta:
         return "invalid_key"
     return (meta.get("label") or "unnamed")[:32]
@@ -866,10 +645,12 @@ def _caller_label(request: Request) -> str:
 async def request_id_and_timing_middleware(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
     start = time.perf_counter()
-    caller = _caller_label(request)
     method = request.method
     path = request.url.path or "/"
-
+    try:
+        caller = await _caller_label(request)
+    except Exception:
+        caller = "error"
     try:
         response = await call_next(request)
     except HTTPException as e:
@@ -886,7 +667,7 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     return response
 
 # ----------------------------
-# Admin: API key management (protected by user/pass in admin_auth.json)
+# Admin: API key management (protected by user/pass in DB)
 # ----------------------------
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -975,9 +756,10 @@ async def admin_js():
 
 @app.get("/admin/keys")
 async def admin_list_keys(_user: str = Depends(require_admin_auth)):
+    api_keys = await db.api_key_get_all()
     keys = [
         {"key": k, "key_masked": _mask_api_key(k), "label": m.get("label") or "", "expires_at": m.get("expires_at") or ""}
-        for k, m in API_KEYS.items()
+        for k, m in api_keys.items()
     ]
     return {"keys": keys}
 
@@ -995,14 +777,14 @@ async def admin_add_key(body: AdminAddKeyBody, _user: str = Depends(require_admi
     key = body.key.strip()
     if not key:
         raise HTTPException(status_code=400, detail="key required")
-    if key in API_KEYS:
+    existing = await db.api_key_get(key)
+    if existing:
         raise HTTPException(status_code=400, detail="Key already exists")
     try:
         _parse_utc_iso_z(body.expires_at)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid expires_at (use ISO UTC, e.g. 2026-12-31T23:59:59Z)")
-    API_KEYS[key] = {"expires_at": body.expires_at.strip(), "label": (body.label or "").strip()}
-    await save_api_keys_async()
+    await db.api_key_set(key, body.expires_at.strip(), (body.label or "").strip())
     return {"ok": True, "key": key}
 
 class AdminUpdateKeyBody(BaseModel):
@@ -1013,17 +795,17 @@ class AdminUpdateKeyBody(BaseModel):
 @app.patch("/admin/keys")
 async def admin_update_key(body: AdminUpdateKeyBody, _user: str = Depends(require_admin_auth)):
     key = body.key.strip()
-    if key not in API_KEYS:
+    meta = await db.api_key_get(key)
+    if not meta:
         raise HTTPException(status_code=404, detail="Key not found")
-    if body.label is not None:
-        API_KEYS[key]["label"] = body.label.strip()
+    label = meta.get("label", "").strip() if body.label is None else body.label.strip()
+    expires_at = meta.get("expires_at", "") if body.expires_at is None else body.expires_at.strip()
     if body.expires_at is not None:
         try:
-            _parse_utc_iso_z(body.expires_at)
+            _parse_utc_iso_z(expires_at)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid expires_at")
-        API_KEYS[key]["expires_at"] = body.expires_at.strip()
-    await save_api_keys_async()
+    await db.api_key_set(key, expires_at, label)
     return {"ok": True}
 
 class AdminDeleteKeyBody(BaseModel):
@@ -1032,15 +814,14 @@ class AdminDeleteKeyBody(BaseModel):
 @app.delete("/admin/keys")
 async def admin_delete_key(body: AdminDeleteKeyBody, _user: str = Depends(require_admin_auth)):
     key = body.key.strip()
-    if key not in API_KEYS:
+    if not await db.api_key_get(key):
         raise HTTPException(status_code=404, detail="Key not found")
-    del API_KEYS[key]
-    await save_api_keys_async()
+    await db.api_key_delete(key)
     return {"ok": True}
 
 @app.post("/admin/reload-scammers")
 async def admin_reload_scammers(_user: str = Depends(require_admin_auth)):
-    load_scammers_db()
+    await load_scammers_db()
     return {"ok": True, "known_scammers_count": len(_KNOWN_SCAMMERS)}
 
 # ----------------------------
@@ -1060,7 +841,7 @@ async def twofa_setup(
     if not user_id:
         raise HTTPException(status_code=400, detail="Invalid user_id")
 
-    existing = _twofa_get_user_entry(x_api_key, user_id)
+    existing = await db.twofa_get_user_entry(x_api_key, user_id)
     if existing and existing.get("enabled"):
         return {"ok": True, "enabled": True, "user_id": user_id, "detail": "2FA already enabled for this user"}
 
@@ -1082,8 +863,7 @@ async def twofa_setup(
         "created_at": _utc_now_z(),
         "label": label,
     }
-    _twofa_set_user_entry(x_api_key, user_id, entry)
-    await save_twofa_db()
+    await db.twofa_set_user_entry(x_api_key, user_id, entry)
 
     return {
         "ok": True,
@@ -1105,7 +885,7 @@ async def twofa_enable(
         raise HTTPException(status_code=401, detail="Missing API key")
 
     user_id = _sanitize_twofa_user_id(body.user_id)
-    entry = _twofa_get_user_entry(x_api_key, user_id)
+    entry = await db.twofa_get_user_entry(x_api_key, user_id)
     if not entry:
         raise HTTPException(status_code=400, detail="2FA not set up yet. Call /2fa/setup first")
 
@@ -1118,8 +898,7 @@ async def twofa_enable(
 
     entry["enabled"] = True
     entry["enabled_at"] = _utc_now_z()
-    _twofa_set_user_entry(x_api_key, user_id, entry)
-    await save_twofa_db()
+    await db.twofa_set_user_entry(x_api_key, user_id, entry)
 
     return {"ok": True, "enabled": True, "user_id": user_id}
 
@@ -1134,7 +913,7 @@ async def twofa_verify(
         raise HTTPException(status_code=401, detail="Missing API key")
 
     user_id = _sanitize_twofa_user_id(body.user_id)
-    entry = _twofa_get_user_entry(x_api_key, user_id)
+    entry = await db.twofa_get_user_entry(x_api_key, user_id)
     if not entry or not entry.get("enabled"):
         raise HTTPException(status_code=403, detail="2FA not enabled for this user_id under this API key")
 
@@ -1159,7 +938,7 @@ async def authenticate_2fa(
         raise HTTPException(status_code=401, detail="Missing API key")
 
     user_id = _sanitize_twofa_user_id(body.user_id)
-    entry = _twofa_get_user_entry(x_api_key, user_id)
+    entry = await db.twofa_get_user_entry(x_api_key, user_id)
     if not entry or not entry.get("enabled"):
         raise HTTPException(status_code=403, detail="2FA not enabled for this user_id under this API key")
 
@@ -1183,7 +962,7 @@ async def twofa_status(
         raise HTTPException(status_code=401, detail="Missing API key")
 
     uid = _sanitize_twofa_user_id(user_id)
-    entry = _twofa_get_user_entry(x_api_key, uid)
+    entry = await db.twofa_get_user_entry(x_api_key, uid)
     return {
         "ok": True,
         "user_id": uid,
@@ -1202,20 +981,18 @@ async def ready():
 
 @app.get("/health")
 async def health(_meta: dict = Depends(require_api_key)):
-    # count total users enrolled across all keys
-    total_users = 0
+    twofa_data = await db.twofa_get_all_keys_users()
+    total_users = sum(len((rec or {}).get("users") or {}) for rec in twofa_data.values())
     enabled_users = 0
-    for krec in _TWOFA.values():
-        users = (krec or {}).get("users") if isinstance(krec, dict) else {}
-        if isinstance(users, dict):
-            total_users += len(users)
-            enabled_users += sum(1 for u in users.values() if isinstance(u, dict) and u.get("enabled"))
+    for rec in twofa_data.values():
+        users = (rec or {}).get("users") or {}
+        enabled_users += sum(1 for u in users.values() if isinstance(u, dict) and u.get("enabled"))
 
     return {
         "ok": True,
         "db_loaded": True,
         "known_scammers_count": len(_KNOWN_SCAMMERS),
-        "twofa_keys_count": len(_TWOFA),
+        "twofa_keys_count": len(twofa_data),
         "twofa_users_count": total_users,
         "twofa_enabled_users_count": enabled_users,
         "utc": _utc_now_z(),
@@ -1253,8 +1030,6 @@ async def ban_request(
     proof_filename = proof.filename or f"proof{ext}"
 
     case_id = uuid.uuid4().hex[:12].upper()
-    case_dir = BANREQ_DIR / case_id
-    case_dir.mkdir(parents=True, exist_ok=True)
 
     proof_url = await upload_banreport_proof_to_interna(
         proof_bytes=proof_bytes,
@@ -1276,7 +1051,7 @@ async def ban_request(
     if proof_url:
         record["proof_url"] = proof_url
 
-    (case_dir / "request.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    await db.ban_request_insert(record)
 
     await post_banrequest_to_discord_webhook(
         case_id=case_id,
@@ -1335,21 +1110,18 @@ async def resolve_banrequest_case(
     if action not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="action must be approve or reject")
 
-    case_dir = BANREQ_DIR / case_id.upper()
-    data_path = case_dir / "request.json"
-    if not data_path.exists():
+    data = await db.ban_request_get(case_id)
+    if not data:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    data = json.loads(data_path.read_text(encoding="utf-8"))
-    data["status"] = "approved" if action == "approve" else "rejected"
-    data["review"] = {
+    status_val = "approved" if action == "approve" else "rejected"
+    review = {
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "reviewed_by": _meta.get("label") or "unknown",
         "decision": body.decision_note.strip() or ("Approved" if action == "approve" else "Rejected"),
     }
-
-    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return {"ok": True, "case_id": data["case_id"], "status": data["status"]}
+    await db.ban_request_update_status(case_id, status_val, review)
+    return {"ok": True, "case_id": data["case_id"], "status": status_val}
 
 @app.post("/detect")
 async def detect(req: DetectRequest, request: Request, _meta: dict = Depends(require_api_key)):
@@ -1359,11 +1131,10 @@ async def detect(req: DetectRequest, request: Request, _meta: dict = Depends(req
 
 @app.get("/banrequest/{case_id}")
 async def get_banrequest_case(case_id: str, _meta: dict = Depends(require_api_key)):
-    case_dir = BANREQ_DIR / case_id.upper()
-    data_path = case_dir / "request.json"
-    if not data_path.exists():
+    data = await db.ban_request_get(case_id)
+    if not data:
         raise HTTPException(status_code=404, detail="Case not found")
-    return json.loads(data_path.read_text(encoding="utf-8"))
+    return data
 
 # ----------------------------
 # False positive report (same flow as ban request)
@@ -1400,8 +1171,6 @@ async def false_positive_report(
     proof_filename = proof.filename or f"proof{ext}"
 
     case_id = uuid.uuid4().hex[:12].upper()
-    case_dir = FPREQ_DIR / case_id
-    case_dir.mkdir(parents=True, exist_ok=True)
 
     proof_url = await upload_banreport_proof_to_interna(
         proof_bytes=proof_bytes,
@@ -1423,7 +1192,7 @@ async def false_positive_report(
     if proof_url:
         record["proof_url"] = proof_url
 
-    (case_dir / "request.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    await db.fp_report_insert(record)
 
     await post_falsepositivereport_to_discord_webhook(
         case_id=case_id,
@@ -1448,30 +1217,26 @@ async def resolve_falsepositivereport_case(
     if action not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="action must be approve or reject")
 
-    case_dir = FPREQ_DIR / case_id.upper()
-    data_path = case_dir / "request.json"
-    if not data_path.exists():
+    data = await db.fp_report_get(case_id)
+    if not data:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    data = json.loads(data_path.read_text(encoding="utf-8"))
-    data["status"] = "approved" if action == "approve" else "rejected"
-    data["review"] = {
+    status_val = "approved" if action == "approve" else "rejected"
+    review = {
         "reviewed_at": datetime.now(timezone.utc).isoformat(),
         "reviewed_by": _meta.get("label") or "unknown",
         "decision": body.decision_note.strip() or ("Approved" if action == "approve" else "Rejected"),
     }
-
-    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return {"ok": True, "case_id": data["case_id"], "status": data["status"]}
+    await db.fp_report_update_status(case_id, status_val, review)
+    return {"ok": True, "case_id": data["case_id"], "status": status_val}
 
 
 @app.get("/falsepositivereport/{case_id}")
 async def get_falsepositivereport_case(case_id: str, _meta: dict = Depends(require_api_key)):
-    case_dir = FPREQ_DIR / case_id.upper()
-    data_path = case_dir / "request.json"
-    if not data_path.exists():
+    data = await db.fp_report_get(case_id)
+    if not data:
         raise HTTPException(status_code=404, detail="Case not found")
-    return json.loads(data_path.read_text(encoding="utf-8"))
+    return data
 
 @app.get("/")
 def root():
