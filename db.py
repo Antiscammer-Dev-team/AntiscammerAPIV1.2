@@ -1,24 +1,28 @@
 """
 PostgreSQL database layer for AntiScammer API.
 Uses asyncpg. Configure via env: DB_USERNAME, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME.
+SSL: DB_SSLMODE (default require). For disable: DB_SSLMODE=disable
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import asyncpg
 
 log = logging.getLogger("db")
 
-# Config from env (username/password you set in env)
 DB_HOST = os.getenv("DB_HOST", "manage.modoralabs.com")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "antiscammer")
 DB_USER = os.getenv("DB_USERNAME") or os.getenv("DB_USER", "")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+
+# SSL mode: require / prefer / disable / verify-full / verify-ca
+# asyncpg doesn't take sslmode directly; we map "disable" => ssl=False, everything else => ssl=True
+DB_SSLMODE = (os.getenv("DB_SSLMODE") or "require").strip().lower()
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -35,6 +39,9 @@ async def init_pool() -> asyncpg.Pool:
         return _pool
     if not DB_USER or not DB_PASSWORD:
         raise RuntimeError("DB_USERNAME and DB_PASSWORD must be set in env")
+
+    ssl = False if DB_SSLMODE == "disable" else True
+
     _pool = await asyncpg.create_pool(
         host=DB_HOST,
         port=DB_PORT,
@@ -44,8 +51,16 @@ async def init_pool() -> asyncpg.Pool:
         min_size=1,
         max_size=10,
         command_timeout=30,
+        ssl=ssl,
     )
-    log.info("Database pool created %s@%s:%s/%s", DB_USER, DB_HOST, DB_PORT, DB_NAME)
+    log.info(
+        "Database pool created %s@%s:%s/%s ssl=%s",
+        DB_USER,
+        DB_HOST,
+        DB_PORT,
+        DB_NAME,
+        DB_SSLMODE,
+    )
     return _pool
 
 
@@ -57,29 +72,83 @@ async def close_pool() -> None:
         log.info("Database pool closed")
 
 
+async def _ensure_jsonb_columns(conn: asyncpg.Connection) -> None:
+    """
+    If your tables already existed with reporter_meta/review as TEXT, CREATE TABLE IF NOT EXISTS won't fix it.
+    This migrates them to JSONB safely.
+    """
+    # Ban requests
+    await conn.execute(
+        """
+        ALTER TABLE "Ban requests"
+            ALTER COLUMN reporter_meta TYPE jsonb
+            USING CASE
+                WHEN reporter_meta IS NULL THEN NULL
+                WHEN pg_typeof(reporter_meta)::text = 'jsonb' THEN reporter_meta
+                ELSE reporter_meta::jsonb
+            END
+        """
+    )
+    await conn.execute(
+        """
+        ALTER TABLE "Ban requests"
+            ALTER COLUMN review TYPE jsonb
+            USING CASE
+                WHEN review IS NULL THEN NULL
+                WHEN pg_typeof(review)::text = 'jsonb' THEN review
+                ELSE review::jsonb
+            END
+        """
+    )
+
+    # False positive reports
+    await conn.execute(
+        """
+        ALTER TABLE "False positive reports"
+            ALTER COLUMN reporter_meta TYPE jsonb
+            USING CASE
+                WHEN reporter_meta IS NULL THEN NULL
+                WHEN pg_typeof(reporter_meta)::text = 'jsonb' THEN reporter_meta
+                ELSE reporter_meta::jsonb
+            END
+        """
+    )
+    await conn.execute(
+        """
+        ALTER TABLE "False positive reports"
+            ALTER COLUMN review TYPE jsonb
+            USING CASE
+                WHEN review IS NULL THEN NULL
+                WHEN pg_typeof(review)::text = 'jsonb' THEN review
+                ELSE review::jsonb
+            END
+        """
+    )
+
+
 async def init_tables(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS \"API keys\" (
+            CREATE TABLE IF NOT EXISTS "API keys" (
                 key TEXT PRIMARY KEY,
                 expires_at TEXT NOT NULL,
                 label TEXT NOT NULL DEFAULT ''
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS \"Admin credentials\" (
+            CREATE TABLE IF NOT EXISTS "Admin credentials" (
                 username TEXT PRIMARY KEY,
                 password TEXT NOT NULL
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS \"Global banlist\" (
+            CREATE TABLE IF NOT EXISTS "Global banlist" (
                 user_id TEXT PRIMARY KEY,
                 reason TEXT NOT NULL
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS \"2FA\" (
+            CREATE TABLE IF NOT EXISTS "2FA" (
                 api_key TEXT NOT NULL,
                 user_id TEXT NOT NULL,
                 enabled BOOLEAN NOT NULL DEFAULT FALSE,
@@ -90,8 +159,11 @@ async def init_tables(pool: asyncpg.Pool) -> None:
                 PRIMARY KEY (api_key, user_id)
             )
         """)
+
+        # These two tables might already exist from earlier versions. Keep create-if-not-exists,
+        # then force reporter_meta/review to JSONB via ALTER.
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS \"Ban requests\" (
+            CREATE TABLE IF NOT EXISTS "Ban requests" (
                 case_id TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL,
                 user_id TEXT NOT NULL,
@@ -105,7 +177,7 @@ async def init_tables(pool: asyncpg.Pool) -> None:
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS \"False positive reports\" (
+            CREATE TABLE IF NOT EXISTS "False positive reports" (
                 case_id TEXT PRIMARY KEY,
                 created_at TEXT NOT NULL,
                 user_id TEXT NOT NULL,
@@ -118,13 +190,21 @@ async def init_tables(pool: asyncpg.Pool) -> None:
                 review JSONB
             )
         """)
+
+        # Force correct types even if table existed already
+        try:
+            await _ensure_jsonb_columns(conn)
+        except Exception:
+            # If old columns contain invalid JSON strings, the cast can fail.
+            # In that case you'd need a one-time manual cleanup, but this makes the error visible.
+            log.exception("Failed to migrate reporter_meta/review columns to JSONB")
+
     log.info("Database tables initialized")
 
 
 async def seed_defaults(pool: asyncpg.Pool) -> None:
-    """Insert default API keys and admin auth if tables are empty."""
     async with pool.acquire() as conn:
-        n = await conn.fetchval("SELECT COUNT(*) FROM \"API keys\"")
+        n = await conn.fetchval('SELECT COUNT(*) FROM "API keys"')
         if n == 0:
             defaults = [
                 ("ATSM-GLTW-KYPE-B239", "2026-05-28T23:59:59Z", "Antiscammer Review team"),
@@ -138,14 +218,15 @@ async def seed_defaults(pool: asyncpg.Pool) -> None:
             ]
             for key, exp, label in defaults:
                 await conn.execute(
-                    "INSERT INTO \"API keys\" (key, expires_at, label) VALUES ($1, $2, $3)",
+                    'INSERT INTO "API keys" (key, expires_at, label) VALUES ($1, $2, $3)',
                     key, exp, label,
                 )
             log.info("Seeded default API keys")
-        n = await conn.fetchval("SELECT COUNT(*) FROM \"Admin credentials\"")
+
+        n = await conn.fetchval('SELECT COUNT(*) FROM "Admin credentials"')
         if n == 0:
             await conn.execute(
-                "INSERT INTO \"Admin credentials\" (username, password) VALUES ($1, $2)",
+                'INSERT INTO "Admin credentials" (username, password) VALUES ($1, $2)',
                 "admin", "changeme",
             )
             log.warning("Seeded default admin auth (admin/changeme) — change it!")
@@ -158,7 +239,7 @@ async def api_key_get(key: str) -> Optional[Dict[str, Any]]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT key, expires_at, label FROM \"API keys\" WHERE key = $1", key
+            'SELECT key, expires_at, label FROM "API keys" WHERE key = $1', key
         )
     if row is None:
         return None
@@ -168,7 +249,7 @@ async def api_key_get(key: str) -> Optional[Dict[str, Any]]:
 async def api_key_get_all() -> Dict[str, Dict[str, Any]]:
     pool = get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT key, expires_at, label FROM \"API keys\"")
+        rows = await conn.fetch('SELECT key, expires_at, label FROM "API keys"')
     return {r["key"]: {"expires_at": r["expires_at"], "label": r["label"] or ""} for r in rows}
 
 
@@ -177,7 +258,7 @@ async def api_key_set(key: str, expires_at: str, label: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO \"API keys\" (key, expires_at, label)
+            INSERT INTO "API keys" (key, expires_at, label)
             VALUES ($1, $2, $3)
             ON CONFLICT (key) DO UPDATE SET expires_at = $2, label = $3
             """,
@@ -188,18 +269,17 @@ async def api_key_set(key: str, expires_at: str, label: str) -> None:
 async def api_key_delete(key: str) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM \"API keys\" WHERE key = $1", key)
+        await conn.execute('DELETE FROM "API keys" WHERE key = $1', key)
 
 
 # ----------------------------
 # Admin auth
 # ----------------------------
 async def admin_auth_get(username: str) -> Optional[str]:
-    """Returns password for username or None."""
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT password FROM \"Admin credentials\" WHERE username = $1", username
+            'SELECT password FROM "Admin credentials" WHERE username = $1', username
         )
     return row["password"] if row else None
 
@@ -209,7 +289,7 @@ async def admin_auth_set(username: str, password: str) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO \"Admin credentials\" (username, password) VALUES ($1, $2)
+            INSERT INTO "Admin credentials" (username, password) VALUES ($1, $2)
             ON CONFLICT (username) DO UPDATE SET password = $2
             """,
             username, password,
@@ -222,7 +302,7 @@ async def admin_auth_set(username: str, password: str) -> None:
 async def scammers_get_all() -> Dict[str, str]:
     pool = get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT user_id, reason FROM \"Global banlist\"")
+        rows = await conn.fetch('SELECT user_id, reason FROM "Global banlist"')
     return {r["user_id"]: r["reason"] for r in rows}
 
 
@@ -230,7 +310,7 @@ async def scammer_get(user_id: str) -> Optional[str]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT reason FROM \"Global banlist\" WHERE user_id = $1", user_id
+            'SELECT reason FROM "Global banlist" WHERE user_id = $1', user_id
         )
     return row["reason"] if row else None
 
@@ -238,10 +318,10 @@ async def scammer_get(user_id: str) -> Optional[str]:
 async def scammers_replace_all(data: Dict[str, str]) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM \"Global banlist\"")
+        await conn.execute('DELETE FROM "Global banlist"')
         if data:
             await conn.executemany(
-                "INSERT INTO \"Global banlist\" (user_id, reason) VALUES ($1, $2)",
+                'INSERT INTO "Global banlist" (user_id, reason) VALUES ($1, $2)',
                 [(uid, reason) for uid, reason in data.items()],
             )
 
@@ -255,7 +335,7 @@ async def twofa_get_user_entry(api_key: str, user_id: str) -> Optional[Dict[str,
         row = await conn.fetchrow(
             """
             SELECT enabled, secret_base32, created_at, label, enabled_at
-            FROM \"2FA\" WHERE api_key = $1 AND user_id = $2
+            FROM "2FA" WHERE api_key = $1 AND user_id = $2
             """,
             api_key, user_id,
         )
@@ -270,14 +350,12 @@ async def twofa_get_user_entry(api_key: str, user_id: str) -> Optional[Dict[str,
     }
 
 
-async def twofa_set_user_entry(
-    api_key: str, user_id: str, entry: Dict[str, Any]
-) -> None:
+async def twofa_set_user_entry(api_key: str, user_id: str, entry: Dict[str, Any]) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO \"2FA\" (api_key, user_id, enabled, secret_base32, created_at, label, enabled_at)
+            INSERT INTO "2FA" (api_key, user_id, enabled, secret_base32, created_at, label, enabled_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (api_key, user_id) DO UPDATE SET
                 enabled = $3, secret_base32 = $4, created_at = $5, label = $6, enabled_at = $7
@@ -293,11 +371,10 @@ async def twofa_set_user_entry(
 
 
 async def twofa_get_all_keys_users() -> Dict[str, Dict[str, Any]]:
-    """Returns shape { api_key: { users: { user_id: {...} } } } for health counts."""
     pool = get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT api_key, user_id, enabled, secret_base32, created_at, label, enabled_at FROM \"2FA\""
+            'SELECT api_key, user_id, enabled, secret_base32, created_at, label, enabled_at FROM "2FA"'
         )
     result: Dict[str, Dict[str, Any]] = {}
     for r in rows:
@@ -322,7 +399,7 @@ async def ban_request_insert(record: Dict[str, Any]) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO \"Ban requests\"
+            INSERT INTO "Ban requests"
             (case_id, created_at, user_id, reason, notes, proof_original_name, proof_url, reporter_meta, status, review)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
@@ -333,7 +410,7 @@ async def ban_request_insert(record: Dict[str, Any]) -> None:
             record.get("notes", ""),
             record.get("proof_original_name"),
             record.get("proof_url"),
-            record.get("reporter_meta"),
+            record.get("reporter_meta"),  # dict OK (JSONB)
             record.get("status", "pending"),
             record.get("review"),
         )
@@ -346,7 +423,7 @@ async def ban_request_get(case_id: str) -> Optional[Dict[str, Any]]:
             """
             SELECT case_id, created_at, user_id, reason, notes, proof_original_name, proof_url,
                    reporter_meta, status, review
-            FROM \"Ban requests\" WHERE UPPER(case_id) = UPPER($1)
+            FROM "Ban requests" WHERE UPPER(case_id) = UPPER($1)
             """,
             case_id,
         )
@@ -355,14 +432,12 @@ async def ban_request_get(case_id: str) -> Optional[Dict[str, Any]]:
     return _row_to_case_record(row)
 
 
-async def ban_request_update_status(
-    case_id: str, status: str, review: Dict[str, Any]
-) -> None:
+async def ban_request_update_status(case_id: str, status: str, review: Dict[str, Any]) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            UPDATE \"Ban requests\" SET status = $1, review = $2 WHERE UPPER(case_id) = UPPER($3)
+            UPDATE "Ban requests" SET status = $1, review = $2 WHERE UPPER(case_id) = UPPER($3)
             """,
             status, review, case_id,
         )
@@ -376,7 +451,7 @@ async def fp_report_insert(record: Dict[str, Any]) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO \"False positive reports\"
+            INSERT INTO "False positive reports"
             (case_id, created_at, user_id, reason, notes, proof_original_name, proof_url, reporter_meta, status, review)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
@@ -387,7 +462,7 @@ async def fp_report_insert(record: Dict[str, Any]) -> None:
             record.get("notes", ""),
             record.get("proof_original_name"),
             record.get("proof_url"),
-            record.get("reporter_meta"),
+            record.get("reporter_meta"),  # dict OK (JSONB)
             record.get("status", "pending"),
             record.get("review"),
         )
@@ -400,7 +475,7 @@ async def fp_report_get(case_id: str) -> Optional[Dict[str, Any]]:
             """
             SELECT case_id, created_at, user_id, reason, notes, proof_original_name, proof_url,
                    reporter_meta, status, review
-            FROM \"False positive reports\" WHERE UPPER(case_id) = UPPER($1)
+            FROM "False positive reports" WHERE UPPER(case_id) = UPPER($1)
             """,
             case_id,
         )
@@ -409,14 +484,12 @@ async def fp_report_get(case_id: str) -> Optional[Dict[str, Any]]:
     return _row_to_case_record(row)
 
 
-async def fp_report_update_status(
-    case_id: str, status: str, review: Dict[str, Any]
-) -> None:
+async def fp_report_update_status(case_id: str, status: str, review: Dict[str, Any]) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            UPDATE \"False positive reports\" SET status = $1, review = $2 WHERE UPPER(case_id) = UPPER($3)
+            UPDATE "False positive reports" SET status = $1, review = $2 WHERE UPPER(case_id) = UPPER($3)
             """,
             status, review, case_id,
         )
@@ -434,8 +507,13 @@ def _row_to_case_record(row: asyncpg.Record) -> Dict[str, Any]:
     }
     if row.get("proof_url"):
         out["proof_url"] = row["proof_url"]
-    if row.get("reporter_meta"):
-        out["reporter_meta"] = row["reporter_meta"] if isinstance(row["reporter_meta"], dict) else json.loads(row["reporter_meta"])
-    if row.get("review"):
-        out["review"] = row["review"] if isinstance(row["review"], dict) else json.loads(row["review"])
+
+    rm = row.get("reporter_meta")
+    if rm:
+        out["reporter_meta"] = rm if isinstance(rm, dict) else json.loads(rm)
+
+    rv = row.get("review")
+    if rv:
+        out["review"] = rv if isinstance(rv, dict) else json.loads(rv)
+
     return out

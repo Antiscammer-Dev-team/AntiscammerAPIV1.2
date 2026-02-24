@@ -21,6 +21,7 @@ import pyotp
 from dotenv import load_dotenv
 
 load_dotenv()
+
 import db
 from fastapi import (
     Depends,
@@ -48,15 +49,14 @@ logging.basicConfig(
 log = logging.getLogger("app")
 
 # ----------------------------
-# Config
+# Config (SECRETS FROM ENV)
 # ----------------------------
-DISCORD_WEBHOOK_URL = "https://ptb.discord.com/api/webhooks/1461018711778529438/CtIih5nJmUyHGT_BXwN-LNU4cDPbojcxkr1i7Ri28NBiQ5OE61SVPZ8pWx5vQgUZa0Yi"
-# Separate webhook for false positive reports (set in app or via staff config)
+DISCORD_WEBHOOK_URL = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
 DISCORD_FALSE_POSITIVE_WEBHOOK_URL = (os.getenv("DISCORD_FALSE_POSITIVE_WEBHOOK_URL") or "").strip()
 
-OLLAMA_BASE_URL = "https://ollama.com/api"
-OLLAMA_API_KEY = "f898de33fc0c4bd594308d8dcb133c4e.YMyG_NSTlypAEst3mTpQrh_f"
-OLLAMA_MODEL = "gpt-oss:20b-cloud"
+OLLAMA_BASE_URL = (os.getenv("OLLAMA_BASE_URL") or "https://ollama.com/api").strip()
+OLLAMA_API_KEY = (os.getenv("OLLAMA_API_KEY") or "").strip()
+OLLAMA_MODEL = (os.getenv("OLLAMA_MODEL") or "gpt-oss:20b-cloud").strip()
 
 # ----------------------------
 # Paths / Storage (file-based storage removed; DB used)
@@ -64,7 +64,7 @@ OLLAMA_MODEL = "gpt-oss:20b-cloud"
 TWOFA_ISSUER = "AntiScammer"
 _admin_auth_scheme = HTTPBasic()
 
-# Ban report proof upload — matches Laravel CDNUploadService (CDN expects "files" + X-Internal-Token)
+# Ban report proof upload — CDN expects "files" + X-Internal-Token
 BAN_REPORT_UPLOAD_URL = (os.getenv("BAN_REPORT_UPLOAD_URL") or os.getenv("baseurl") or "").strip()
 BAN_REPORT_UPLOAD_TOKEN = (os.getenv("BAN_REPORT_UPLOAD_TOKEN") or os.getenv("X-Internal-Token") or "").strip()
 BAN_REPORT_CDN_USER = (os.getenv("CDN_USERNAME") or "").strip()
@@ -107,7 +107,6 @@ def _mask_api_key(key: str) -> str:
     return key[:4] + "-****-****-" + key[-4:] if "-" in key else key[:4] + "****" + key[-4:]
 
 def _generate_api_key() -> str:
-    """Generate a new API key in ATSM-XXXX-XXXX-XXXX form."""
     part = lambda: "".join(__import__("random").choices("0123456789ABCDEF", k=4))
     return f"ATSM-{part()}-{part()}-{part()}"
 
@@ -134,7 +133,6 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None, alias=
     return meta
 
 async def require_admin_auth(credentials: HTTPBasicCredentials = Depends(_admin_auth_scheme)) -> str:
-    """Validate admin username/password; raise 401 if invalid."""
     p = await db.admin_auth_get(credentials.username)
     if not p or p != credentials.password:
         raise HTTPException(
@@ -145,24 +143,20 @@ async def require_admin_auth(credentials: HTTPBasicCredentials = Depends(_admin_
     return credentials.username
 
 # ----------------------------
-# 2FA (Google/Authy) DB + helpers
+# 2FA helpers
 # ----------------------------
 def _b32_secret_new() -> str:
     raw = token_urlsafe(32).encode("utf-8")
     return base64.b32encode(raw).decode("utf-8").replace("=", "")
 
 def _verify_totp(secret_b32: str, code: str) -> bool:
-    # valid_window=1 allows +/- 30 seconds drift (one step)
     totp = pyotp.TOTP(secret_b32)
     return bool(totp.verify(code.strip().replace(" ", ""), valid_window=1))
 
 def _sanitize_twofa_user_id(user_id: str) -> str:
-    # Partner user IDs can be anything stable; keep safe printable + trimmed.
-    # (Do NOT force digits; these are *their* internal user IDs)
     uid = (user_id or "").strip()
     uid = re.sub(r"\s+", " ", uid)
     return uid[:128]
-
 
 # ----------------------------
 # Scammers (loaded from DB into cache)
@@ -209,7 +203,6 @@ async def post_banrequest_to_discord_webhook(
         json.dumps({"content": content, "embeds": [embed]}),
         content_type="application/json",
     )
-
     data.add_field("file", proof_bytes, filename=proof_filename, content_type="application/octet-stream")
 
     if session:
@@ -276,7 +269,6 @@ async def upload_banreport_proof_to_interna(
     case_id: str,
     session: Optional[aiohttp.ClientSession] = None,
 ) -> Optional[str]:
-    """Upload ban report proof to CDN; returns proof URL if successful, else None."""
     if not BAN_REPORT_UPLOAD_URL or not BAN_REPORT_UPLOAD_TOKEN:
         return None
     url = BAN_REPORT_UPLOAD_URL.rstrip("/")
@@ -339,7 +331,6 @@ def canonicalize_for_scam_scan(s: str) -> dict:
     whitespace_ratio = ws / total_chars
 
     looks_vertical = total_lines >= 6 and single_char_line_ratio >= 0.65
-
     joined = ""
     if looks_vertical:
         joined = "".join(ln for ln in lines if len(ln) == 1)
@@ -562,7 +553,7 @@ whitespace_ratio: {ob["whitespace_ratio"]}
 
     decision = model_decision
     uncertain = (decision == "uncertain")
-    is_scam = (decision == "scam")  # your rule: uncertain does not flag
+    is_scam = (decision == "scam")
 
     return {
         "is_scam": is_scam,
@@ -595,10 +586,9 @@ class DetectRequest(BaseModel):
     context_messages: Optional[List[ContextItem]] = None
 
 class ResolveCaseRequest(BaseModel):
-    action: str  # "approve" or "reject"
+    action: str
     decision_note: str = ""
 
-# Multi-user 2FA requests
 class TwoFASetupRequest(BaseModel):
     user_id: str = Field(..., min_length=1, max_length=128)
     label: Optional[str] = Field(default=None, max_length=128)
@@ -612,7 +602,6 @@ class TwoFACodeRequest(BaseModel):
 # ----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: init DB pool, tables, seed defaults, load scammers cache, HTTP session
     pool = await db.init_pool()
     await db.init_tables(pool)
     await db.seed_defaults(pool)
@@ -632,7 +621,6 @@ app = FastAPI(title="AntiScammer Local API (Keyed)", lifespan=lifespan)
 log.info("API booting...")
 
 async def _caller_label(request: Request) -> str:
-    """Resolve API key to label for logging (no_key, invalid_key, or label)."""
     key = request.headers.get("X-API-Key")
     if not key:
         return "no_key"
@@ -667,7 +655,7 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     return response
 
 # ----------------------------
-# Admin: API key management (protected by user/pass in DB)
+# Admin: API key management
 # ----------------------------
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -750,7 +738,6 @@ async def admin_page():
 
 @app.get("/admin/admin.js")
 async def admin_js():
-    """Serve admin JS externally (CSP-friendly)."""
     js_path = Path(__file__).with_name("admin.js")
     return Response(content=js_path.read_text(encoding="utf-8"), media_type="application/javascript")
 
@@ -825,8 +812,7 @@ async def admin_reload_scammers(_user: str = Depends(require_admin_auth)):
     return {"ok": True, "known_scammers_count": len(_KNOWN_SCAMMERS)}
 
 # ----------------------------
-# 2FA endpoints (Google/Authy side)
-# Partner must send user_id (their internal user)
+# 2FA endpoints
 # ----------------------------
 @app.post("/2fa/setup")
 async def twofa_setup(
@@ -846,10 +832,7 @@ async def twofa_setup(
         return {"ok": True, "enabled": True, "user_id": user_id, "detail": "2FA already enabled for this user"}
 
     secret = _b32_secret_new()
-
     partner_label = _meta.get("label") or "partner"
-    # Name shown inside authenticator app
-    # Recommend: "<partner_label>:<user_id>" so multiple users are easy to tell apart
     label = (body.label or f"{partner_label}:{user_id}").strip()[:128]
 
     otpauth_url = pyotp.TOTP(secret).provisioning_uri(
@@ -872,7 +855,7 @@ async def twofa_setup(
         "issuer": TWOFA_ISSUER,
         "account": label,
         "otpauth_url": otpauth_url,
-        "secret_base32": secret,  # remove if you don't want manual entry exposed
+        "secret_base32": secret,
     }
 
 @app.post("/2fa/enable")
@@ -902,7 +885,6 @@ async def twofa_enable(
 
     return {"ok": True, "enabled": True, "user_id": user_id}
 
-# Partner calls THIS to validate a code
 @app.post("/2fa/verify")
 async def twofa_verify(
     body: TwoFACodeRequest,
@@ -926,14 +908,12 @@ async def twofa_verify(
 
     return {"ok": True, "valid": True, "user_id": user_id}
 
-# Keep your old endpoint name as an alias for partner convenience
 @app.post("/authenticate")
 async def authenticate_2fa(
     body: TwoFACodeRequest,
     _meta: dict = Depends(require_api_key),
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ):
-    # Alias of /2fa/verify
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
 
@@ -951,7 +931,6 @@ async def authenticate_2fa(
 
     return {"ok": True, "valid": True, "user_id": user_id}
 
-# (Optional) simple status endpoint for partner UX
 @app.get("/2fa/status")
 async def twofa_status(
     user_id: str,
@@ -976,7 +955,6 @@ async def twofa_status(
 # ----------------------------
 @app.get("/ready")
 async def ready():
-    """Unauthenticated readiness probe for load balancers/orchestrators."""
     return {"ok": True}
 
 @app.get("/health")
@@ -1040,12 +1018,12 @@ async def ban_request(
 
     record = {
         "case_id": case_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": _utc_now_z(),
         "user_id": uid,
         "reason": reason.strip(),
         "notes": notes.strip(),
         "proof_original_name": proof.filename,
-        "reporter_meta": _meta,
+        "reporter_meta": _meta,  # dict -> JSONB
         "status": "pending",
     }
     if proof_url:
@@ -1116,7 +1094,7 @@ async def resolve_banrequest_case(
 
     status_val = "approved" if action == "approve" else "rejected"
     review = {
-        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "reviewed_at": _utc_now_z(),
         "reviewed_by": _meta.get("label") or "unknown",
         "decision": body.decision_note.strip() or ("Approved" if action == "approve" else "Rejected"),
     }
@@ -1137,7 +1115,7 @@ async def get_banrequest_case(case_id: str, _meta: dict = Depends(require_api_ke
     return data
 
 # ----------------------------
-# False positive report (same flow as ban request)
+# False positive report
 # ----------------------------
 @app.post("/falsepositivereport")
 async def false_positive_report(
@@ -1181,12 +1159,12 @@ async def false_positive_report(
 
     record = {
         "case_id": case_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": _utc_now_z(),
         "user_id": uid,
         "reason": reason.strip(),
         "notes": notes.strip(),
         "proof_original_name": proof.filename,
-        "reporter_meta": _meta,
+        "reporter_meta": _meta,  # dict -> JSONB
         "status": "pending",
     }
     if proof_url:
@@ -1206,7 +1184,6 @@ async def false_positive_report(
 
     return {"ok": True, "case_id": case_id}
 
-
 @app.post("/falsepositivereport/{case_id}/resolve")
 async def resolve_falsepositivereport_case(
     case_id: str,
@@ -1223,13 +1200,12 @@ async def resolve_falsepositivereport_case(
 
     status_val = "approved" if action == "approve" else "rejected"
     review = {
-        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "reviewed_at": _utc_now_z(),
         "reviewed_by": _meta.get("label") or "unknown",
         "decision": body.decision_note.strip() or ("Approved" if action == "approve" else "Rejected"),
     }
     await db.fp_report_update_status(case_id, status_val, review)
     return {"ok": True, "case_id": data["case_id"], "status": status_val}
-
 
 @app.get("/falsepositivereport/{case_id}")
 async def get_falsepositivereport_case(case_id: str, _meta: dict = Depends(require_api_key)):

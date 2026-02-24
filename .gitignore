@@ -2,3 +2,5 @@
 .idea/inspectionProfiles/Project_Default.xml
 /.idea
 docs.html
+sync_scammers_to_db.py
+requirements-sync.txt
