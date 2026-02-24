@@ -446,9 +446,9 @@ async def ban_request_insert(record: Dict[str, Any]) -> None:
             record.get("notes", ""),
             record.get("proof_original_name"),
             record.get("proof_url"),
-            record.get("reporter_meta"),  # dict OK (JSONB)
+            _jsonb_val(record.get("reporter_meta")),
             record.get("status", "pending"),
-            record.get("review"),
+            _jsonb_val(record.get("review")),
         )
 
 
@@ -475,7 +475,7 @@ async def ban_request_update_status(case_id: str, status: str, review: Dict[str,
             """
             UPDATE "Ban requests" SET status = $1, review = $2 WHERE UPPER(case_id) = UPPER($3)
             """,
-            status, review, case_id,
+            status, _jsonb_val(review), case_id,
         )
 
 
@@ -498,9 +498,9 @@ async def fp_report_insert(record: Dict[str, Any]) -> None:
             record.get("notes", ""),
             record.get("proof_original_name"),
             record.get("proof_url"),
-            record.get("reporter_meta"),  # dict OK (JSONB)
+            _jsonb_val(record.get("reporter_meta")),
             record.get("status", "pending"),
-            record.get("review"),
+            _jsonb_val(record.get("review")),
         )
 
 
@@ -527,8 +527,19 @@ async def fp_report_update_status(case_id: str, status: str, review: Dict[str, A
             """
             UPDATE "False positive reports" SET status = $1, review = $2 WHERE UPPER(case_id) = UPPER($3)
             """,
-            status, review, case_id,
+            status, _jsonb_val(review), case_id,
         )
+
+
+def _jsonb_val(value: Any) -> Optional[str]:
+    """Serialize dict/list to JSON string for JSONB params; asyncpg may expect str not dict."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value)
 
 
 def _row_to_case_record(row: asyncpg.Record) -> Dict[str, Any]:
