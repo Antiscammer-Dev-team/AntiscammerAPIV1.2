@@ -1,18 +1,22 @@
 """
 PostgreSQL database layer for AntiScammer API.
-Uses asyncpg. Configure via env: DB_USERNAME, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME.
-SSL: DB_SSLMODE (default require). For disable: DB_SSLMODE=disable
+Uses asyncpg. Configure via env: DB_USERNAME, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME (or DATABASE_URL).
+SSL: DB_SSLMODE = disable | require | require-no-verify (default: require).
+  require-no-verify = use SSL but do not verify server cert (for self-signed/internal).
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-from typing import Any, Dict, Optional
+import ssl
+from typing import Any, Dict, Optional, Union
 
 import asyncpg
 
 log = logging.getLogger("db")
+
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
 DB_HOST = os.getenv("DB_HOST", "manage.modoralabs.com")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
@@ -20,8 +24,7 @@ DB_NAME = os.getenv("DB_NAME", "antiscammer")
 DB_USER = os.getenv("DB_USERNAME") or os.getenv("DB_USER", "")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
-# SSL mode: require / prefer / disable / verify-full / verify-ca
-# asyncpg doesn't take sslmode directly; we map "disable" => ssl=False, everything else => ssl=True
+# SSL: disable | require | require-no-verify (SSL without cert verification)
 DB_SSLMODE = (os.getenv("DB_SSLMODE") or "require").strip().lower()
 
 _pool: Optional[asyncpg.Pool] = None
@@ -33,14 +36,47 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+def _ssl_for_asyncpg() -> Union[bool, ssl.SSLContext]:
+    """Return ssl argument for asyncpg: False, True, or context that skips verification."""
+    if DB_SSLMODE == "disable":
+        return False
+    if DB_SSLMODE == "require-no-verify":
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    return True
+
+
+def _normalize_dsn(url: str) -> str:
+    if url.startswith("postgres://"):
+        return "postgresql://" + url[11:]
+    return url
+
+
 async def init_pool() -> asyncpg.Pool:
     global _pool
     if _pool is not None:
         return _pool
-    if not DB_USER or not DB_PASSWORD:
-        raise RuntimeError("DB_USERNAME and DB_PASSWORD must be set in env")
 
-    ssl = False if DB_SSLMODE == "disable" else True
+    ssl_ctx = _ssl_for_asyncpg()
+
+    if DATABASE_URL:
+        dsn = _normalize_dsn(DATABASE_URL)
+        _pool = await asyncpg.create_pool(
+            dsn=dsn,
+            min_size=1,
+            max_size=10,
+            command_timeout=30,
+            ssl=ssl_ctx,
+        )
+        log.info("Database pool created from DATABASE_URL")
+        return _pool
+
+    if not DB_USER or not DB_PASSWORD:
+        raise RuntimeError(
+            "Set DATABASE_URL or both DB_USERNAME and DB_PASSWORD in env"
+        )
 
     _pool = await asyncpg.create_pool(
         host=DB_HOST,
@@ -51,7 +87,7 @@ async def init_pool() -> asyncpg.Pool:
         min_size=1,
         max_size=10,
         command_timeout=30,
-        ssl=ssl,
+        ssl=ssl_ctx,
     )
     log.info(
         "Database pool created %s@%s:%s/%s ssl=%s",

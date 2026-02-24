@@ -1,6 +1,11 @@
 # AntiScammer API - Coolify compatible
 FROM python:3.11-slim
 
+# CA certificates so SSL to PostgreSQL (e.g. Let's Encrypt) can be verified with DB_SSLMODE=require
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user for security
 RUN groupadd --gid 1000 appuser \
     && useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser
