@@ -249,6 +249,7 @@ async def seed_defaults(pool: asyncpg.Pool) -> None:
                 ("ATSM-QI5H-CG8M-2065", "3072-12-31T23:59:59Z", "FZ vouch"),
                 ("ATSM-8R5H-5Z6L-151D", "2026-05-28T23:59:59Z", "Modora"),
                 ("ATSM-YJC4-CDAF-227D", "3072-12-31T23:59:59Z", "Modora Dev"),
+                ("ATSM-4B70-A74B-9D4C", "2027-12-31T23:59:59Z", "Modora production"),
                 ("Test-key-123-456", "3072-12-31T23:59:59Z", "test"),
                 ("ATSM-C2S4-A2S4-F5S5", "2026-04-15T23:59:59Z", "draakjekevin"),
             ]
@@ -258,6 +259,15 @@ async def seed_defaults(pool: asyncpg.Pool) -> None:
                     key, exp, label,
                 )
             log.info("Seeded default API keys")
+
+        # Ensure ATSM-4B70-A74B-9D4C exists (e.g. production had older seed without it)
+        await conn.execute(
+            """
+            INSERT INTO "API keys" (key, expires_at, label) VALUES ($1, $2, $3)
+            ON CONFLICT (key) DO NOTHING
+            """,
+            "ATSM-4B70-A74B-9D4C", "2027-12-31T23:59:59Z", "Modora production",
+        )
 
         n = await conn.fetchval('SELECT COUNT(*) FROM "Admin credentials"')
         if n == 0:
