@@ -396,6 +396,7 @@ remote connections via tools like anydesk and teamviewer are fine if there to he
 
 If someone sends a "Having issues replace the file with the one i sent" And has some context of trying to assist. Then its not a scam
 Any messages such as "Send your question/issue here" that does NOT redirect to a channel and instead is a url or mailto link to a discord.gg or github link is likely a scam This does not mean those links are scam look for the message too and pot a ping
+If a message says "share your questions below" (or similar) and contains a link (discord.gg, github, mailto, etc.), treat as likely scam. This can cause false positives; if the link is clearly an official channel or trusted source, prefer uncertain over scam.
 
 If ANYTHING in the message says "SQL" or "DB" or any other database and does not have other indicators thats a hard 100% not scam
 
