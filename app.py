@@ -54,7 +54,8 @@ log = logging.getLogger("app")
 DISCORD_WEBHOOK_URL = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
 DISCORD_FALSE_POSITIVE_WEBHOOK_URL = (os.getenv("DISCORD_FALSE_POSITIVE_WEBHOOK_URL") or "").strip()
 
-OLLAMA_BASE_URL = (os.getenv("OLLAMA_BASE_URL") or "https://ollama.com/api").strip()
+# Ollama API (e.g. https://ollama.com/api for cloud, or http://localhost:11434 for local). We call /generate → .../api/generate or .../generate.
+OLLAMA_BASE_URL = (os.getenv("OLLAMA_BASE_URL") or "https://ollama.com/api").strip().rstrip("/")
 OLLAMA_API_KEY = (os.getenv("OLLAMA_API_KEY") or "").strip()
 OLLAMA_MODEL = (os.getenv("OLLAMA_MODEL") or "gpt-oss:20b-cloud").strip()
 
@@ -460,7 +461,11 @@ whitespace_ratio: {ob["whitespace_ratio"]}
         "Content-Type": "application/json",
     }
 
-    url = f"{OLLAMA_BASE_URL}/generate"
+    # Ollama generate endpoint is /api/generate (see https://github.com/ollama/ollama/blob/main/docs/api.md)
+    if OLLAMA_BASE_URL.rstrip("/").endswith("/api"):
+        url = f"{OLLAMA_BASE_URL.rstrip('/')}/generate"
+    else:
+        url = f"{OLLAMA_BASE_URL}/api/generate"
 
     try:
         async with session.post(
@@ -477,7 +482,7 @@ whitespace_ratio: {ob["whitespace_ratio"]}
                     "decision": "scam" if force_scam else "uncertain",
                     "uncertain": not force_scam,
                     "confidence": None,
-                    "reason": "API error",
+                    "reason": f"Ollama API error (HTTP {resp.status}). Check Ollama is running and model is loaded.",
                     "obfuscation": ob,
                 }
             data = await resp.json()
@@ -488,7 +493,7 @@ whitespace_ratio: {ob["whitespace_ratio"]}
             "decision": "scam" if force_scam else "uncertain",
             "uncertain": not force_scam,
             "confidence": None,
-            "reason": "Exception occurred",
+            "reason": f"Ollama request failed: {type(e).__name__}. Check Ollama URL and connectivity.",
             "obfuscation": ob,
         }
 
