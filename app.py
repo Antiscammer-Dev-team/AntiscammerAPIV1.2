@@ -55,6 +55,7 @@ DISCORD_WEBHOOK_URL = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
 DISCORD_FALSE_POSITIVE_WEBHOOK_URL = (os.getenv("DISCORD_FALSE_POSITIVE_WEBHOOK_URL") or "").strip()
 
 # Ollama API (e.g. https://ollama.com/api for cloud, or http://localhost:11434 for local). We call /generate → .../api/generate or .../generate.
+# For ollama.com cloud: OLLAMA_API_KEY is required (Bearer token); otherwise Ollama returns 401.
 OLLAMA_BASE_URL = (os.getenv("OLLAMA_BASE_URL") or "https://ollama.com/api").strip().rstrip("/")
 OLLAMA_API_KEY = (os.getenv("OLLAMA_API_KEY") or "").strip()
 OLLAMA_MODEL = (os.getenv("OLLAMA_MODEL") or "gpt-oss:20b-cloud").strip()
@@ -477,6 +478,8 @@ whitespace_ratio: {ob["whitespace_ratio"]}
             if resp.status != 200:
                 raw_txt = await resp.text()
                 log.warning("[OLLAMA ERROR] %s: %s", resp.status, raw_txt[:500])
+                if resp.status == 401:
+                    log.warning("[OLLAMA] 401 Unauthorized: set OLLAMA_API_KEY for https://ollama.com/api (cloud auth required)")
                 return {
                     "is_scam": force_scam,
                     "decision": "scam" if force_scam else "uncertain",
@@ -964,7 +967,8 @@ async def ready():
     return {"ok": True}
 
 @app.get("/health")
-async def health(_meta: dict = Depends(require_api_key)):
+async def health():
+    """Public health check (no API key). Use for load balancers / k8s; logs as caller=no_key."""
     twofa_data = await db.twofa_get_all_keys_users()
     total_users = sum(len((rec or {}).get("users") or {}) for rec in twofa_data.values())
     enabled_users = 0
@@ -1105,6 +1109,18 @@ async def resolve_banrequest_case(
         "decision": body.decision_note.strip() or ("Approved" if action == "approve" else "Rejected"),
     }
     await db.ban_request_update_status(case_id, status_val, review)
+
+    # When approving: add user to Global banlist so lookup returns "Flagged", and refresh in-memory cache
+    if action == "approve":
+        uid = _normalize_user_id(data.get("user_id") or "")
+        if uid:
+            reason_text = (data.get("reason") or "").strip() or f"Approved ban request {data.get('case_id', case_id)}"
+            if body.decision_note and body.decision_note.strip():
+                reason_text = f"{reason_text} — {body.decision_note.strip()}"
+            await db.scammer_upsert(uid, reason_text)
+            await load_scammers_db()
+            log.info("Added user %s to Global banlist after ban request approval (case_id=%s)", uid, case_id)
+
     return {"ok": True, "case_id": data["case_id"], "status": status_val}
 
 @app.post("/detect")

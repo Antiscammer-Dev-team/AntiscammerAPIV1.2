@@ -372,6 +372,20 @@ async def scammers_replace_all(data: Dict[str, str]) -> None:
             )
 
 
+async def scammer_upsert(user_id: str, reason: str) -> None:
+    """Add or update a single user in the Global banlist (used when a ban request is approved)."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO "Global banlist" (user_id, reason) VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET reason = EXCLUDED.reason
+            """,
+            user_id,
+            (reason or "Approved ban request").strip() or "Approved ban request",
+        )
+
+
 # ----------------------------
 # 2FA
 # ----------------------------
