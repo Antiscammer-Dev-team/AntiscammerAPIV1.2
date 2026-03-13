@@ -426,6 +426,13 @@ async def scammer_upsert(user_id: str, reason: str) -> None:
             reason,
         )
 
+    # Best-effort mirror into secondary MariaDB, if configured.
+    if maria_mirror is not None:
+        try:
+            await maria_mirror.mirror_scammer_upsert(user_id, reason)
+        except Exception:
+            log.exception("Failed to mirror scammer_upsert to MariaDB")
+
 
 async def scammer_delete(user_id: str) -> None:
     """

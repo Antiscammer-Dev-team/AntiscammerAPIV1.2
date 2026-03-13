@@ -23,6 +23,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import db
+
+try:
+    import maria_mirror  # Optional: used to mirror approved bans into a secondary MariaDB
+except Exception:  # pragma: no cover
+    maria_mirror = None
 from fastapi import (
     Depends,
     FastAPI,
@@ -1303,16 +1308,32 @@ async def resolve_banrequest_case(
     }
     await db.ban_request_update_status(case_id, status_val, review)
 
-    # When approving: add user to Global banlist so lookup returns "Flagged", and refresh in-memory cache
+    # When approving: add user to Global banlist so lookup returns "Flagged", and refresh in-memory cache.
+    # Also mirror this approval into the external MariaDB `global_bans` table (if configured).
     if action == "approve":
         uid = _normalize_user_id(data.get("user_id") or "")
         if uid:
-            reason_text = (data.get("reason") or "").strip() or f"Approved ban request {data.get('case_id', case_id)}"
+            base_reason = (data.get("reason") or "").strip() or f"Approved ban request {data.get('case_id', case_id)}"
+            reason_text = base_reason
             if body.decision_note and body.decision_note.strip():
-                reason_text = f"{reason_text} — {body.decision_note.strip()}"
+                reason_text = f"{base_reason} — {body.decision_note.strip()}"
+
             await db.scammer_upsert(uid, reason_text)
             await load_scammers_db()
             log.info("Added user %s to Global banlist after ban request approval (case_id=%s)", uid, case_id)
+
+            # Best-effort mirror to MariaDB global_bans (secondary DB) without modifying its schema.
+            if maria_mirror is not None:
+                try:
+                    await maria_mirror.mirror_global_ban_insert(
+                        user_id=uid,
+                        reason=reason_text,
+                        banned_by_user_id=str(_meta.get("label") or "unknown"),
+                        source="antiscammer_banrequest",
+                        report_id=str(data.get("case_id") or case_id),
+                    )
+                except Exception:
+                    log.exception("Failed to mirror global ban to MariaDB for user_id=%s case_id=%s", uid, case_id)
 
     return {"ok": True, "case_id": data["case_id"], "status": status_val}
 
