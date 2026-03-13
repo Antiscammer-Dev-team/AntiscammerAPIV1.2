@@ -79,32 +79,49 @@ async def mirror_global_ban_insert(
           id                BIGINT AUTO_INCREMENT PRIMARY KEY,
           user_id           VARCHAR(...) NOT NULL,
           reason            TEXT NOT NULL,
-          banned_by_user_id VARCHAR(...) NULL,
+          banned_by_user_id  VARCHAR(...) NULL,
           source            VARCHAR(...) NULL,
           report_id         VARCHAR(...) NULL,
           created_at        DATETIME NOT NULL,
           updated_at        DATETIME NOT NULL
       )
   """
-  pool = await _get_pool()
-  if pool is None:
+  if not _enabled():
+      log.warning(
+          "MariaDB mirroring skipped: set MARIADB_HOST, MARIADB_USER, MARIADB_PASSWORD, MARIADB_DB to enable"
+      )
       return
 
-  async with pool.acquire() as conn:
-      async with conn.cursor() as cur:
-          await cur.execute(
-              """
-              INSERT INTO global_bans (
-                  user_id,
-                  reason,
-                  banned_by_user_id,
-                  source,
-                  report_id,
-                  created_at,
-                  updated_at
+  pool = await _get_pool()
+  if pool is None:
+      log.warning("MariaDB mirroring skipped: could not create connection pool")
+      return
+
+  try:
+      async with pool.acquire() as conn:
+          async with conn.cursor() as cur:
+              await cur.execute(
+                  """
+                  INSERT INTO global_bans (
+                      user_id,
+                      reason,
+                      banned_by_user_id,
+                      source,
+                      report_id,
+                      created_at,
+                      updated_at
+                  )
+                  VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                  """,
+                  (user_id, reason, banned_by_user_id, source, report_id or None),
               )
-              VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
-              """,
-              (user_id, reason, banned_by_user_id, source, report_id),
-          )
+      log.info(
+          "Mirrored global ban to MariaDB: user_id=%s report_id=%s source=%s",
+          user_id, report_id or "(none)", source,
+      )
+  except Exception:
+      log.exception(
+          "MariaDB global_bans insert failed: user_id=%s report_id=%s",
+          user_id, report_id,
+      )
 

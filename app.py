@@ -1364,7 +1364,12 @@ async def resolve_banrequest_case(
             log.info("Added user %s to Global banlist after ban request approval (case_id=%s)", uid, case_id)
 
             # Best-effort mirror to MariaDB global_bans (secondary DB) without modifying its schema.
-            if maria_mirror is not None:
+            if maria_mirror is None:
+                log.warning(
+                    "MariaDB mirroring not available (maria_mirror module not loaded). "
+                    "Install aiomysql and set MARIADB_* env vars to mirror bans to MariaDB."
+                )
+            else:
                 try:
                     await maria_mirror.mirror_global_ban_insert(
                         user_id=uid,
