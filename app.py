@@ -1011,12 +1011,17 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
     if not reason:
         raise HTTPException(status_code=400, detail="reason required")
 
-    # Postgres: "Global banlist" (user_id, reason only).
+    # 1) Postgres first: "Global banlist" (user_id, reason only).
     await db.scammer_upsert(uid, reason)
     await load_scammers_db()
+    # Verify row is in Postgres (same DB as DATABASE_URL / DB_*)
+    check = await db.scammer_get(uid)
+    if not check:
+        log.error("Postgres write may have failed: user_id=%s not found in Global banlist after upsert (root/scammers)", uid)
+        raise HTTPException(status_code=500, detail="Failed to persist ban to Postgres Global banlist")
     log.info("Added user_id=%s to Postgres Global banlist (root/scammers)", uid)
 
-    # MariaDB: global_bans (full schema). Same ban must appear in both DBs.
+    # 2) MariaDB: global_bans (full schema). Same ban must appear in both DBs.
     if maria_mirror is None:
         log.warning("MariaDB mirror skipped for root/scammers (module not loaded). Only Postgres was updated.")
     else:
