@@ -71,15 +71,17 @@ async def mirror_global_ban_insert(
     report_id: str,
 ) -> None:
   """
-  Insert a global ban row into the existing `global_bans` table in the secondary MariaDB.
+  Insert into MariaDB global_bans only (MariaDB-specific schema).
+  Postgres uses a different table/schema ("Global banlist": user_id, reason only) in db.py.
+  This function does not touch Postgres.
 
-  Expected schema (already created on the MariaDB side, not touched here):
+  MariaDB global_bans schema (already created on the MariaDB side):
 
       global_bans(
           id                BIGINT AUTO_INCREMENT PRIMARY KEY,
           user_id           VARCHAR(...) NOT NULL,
           reason            TEXT NOT NULL,
-          banned_by_user_id  VARCHAR(...) NULL,
+          banned_by_user_id VARCHAR(...) NULL,
           source            VARCHAR(...) NULL,
           report_id         VARCHAR(...) NULL,
           created_at        DATETIME NOT NULL,

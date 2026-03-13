@@ -183,6 +183,7 @@ async def init_tables(pool: asyncpg.Pool) -> None:
                 key TEXT NOT NULL
             )
         """)
+        # Postgres-only schema: simple (user_id, reason). MariaDB uses a different table/schema (global_bans) via maria_mirror.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS "Global banlist" (
                 user_id TEXT PRIMARY KEY,
@@ -381,7 +382,8 @@ async def master_key_set(key: Optional[str]) -> None:
             )
 
 # ----------------------------
-# Known scammers
+# Known scammers (Postgres "Global banlist" only: user_id, reason)
+# MariaDB global_bans uses a different schema and is written via maria_mirror only.
 # ----------------------------
 async def scammers_get_all() -> Dict[str, str]:
     pool = get_pool()
@@ -412,7 +414,8 @@ async def scammers_replace_all(data: Dict[str, str]) -> None:
 
 async def scammer_upsert(user_id: str, reason: str) -> None:
     """
-    Insert or update a single scammer record in the Global banlist.
+    Insert or update a single scammer in Postgres "Global banlist" (schema: user_id, reason only).
+    Does not touch MariaDB; use maria_mirror.mirror_global_ban_insert for MariaDB global_bans.
     """
     pool = get_pool()
     async with pool.acquire() as conn:

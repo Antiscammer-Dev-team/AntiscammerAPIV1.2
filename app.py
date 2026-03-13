@@ -1005,6 +1005,7 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
     if not reason:
         raise HTTPException(status_code=400, detail="reason required")
 
+    # Postgres: "Global banlist" (user_id, reason only). MariaDB: global_bans (full schema) below.
     await db.scammer_upsert(uid, reason)
     await load_scammers_db()
 
@@ -1046,7 +1047,7 @@ async def root_delete_scammer(user_id: str, _master: str = Depends(require_maste
 @app.post("/staff/signal/antiscam/global-ban")
 async def staff_global_ban(body: GlobalBanBody, _master: str = Depends(require_master_api_key)):
     """
-    Add a user to the global banlist (Postgres) and mirror to MariaDB global_bans.
+    Add a user to Postgres "Global banlist" (user_id, reason) and to MariaDB global_bans (full schema).
     Used by the staff dashboard when dispatching a global ban. Requires master API key.
     """
     uid = _normalize_user_id(body.user_id)
@@ -1056,9 +1057,11 @@ async def staff_global_ban(body: GlobalBanBody, _master: str = Depends(require_m
     if not reason:
         raise HTTPException(status_code=400, detail="reason required")
 
+    # Postgres: its format only (user_id, reason).
     await db.scammer_upsert(uid, reason)
     await load_scammers_db()
 
+    # MariaDB: its format (global_bans with banned_by_user_id, source, report_id, timestamps).
     if maria_mirror is not None:
         try:
             await maria_mirror.mirror_global_ban_insert(
@@ -1374,11 +1377,13 @@ async def resolve_banrequest_case(
             if body.decision_note and body.decision_note.strip():
                 reason_text = f"{base_reason} — {body.decision_note.strip()}"
 
+            # Postgres: "Global banlist" (user_id, reason only). MariaDB: global_bans (full schema) below.
             await db.scammer_upsert(uid, reason_text)
             await load_scammers_db()
             log.info("Added user %s to Global banlist after ban request approval (case_id=%s)", uid, case_id)
 
-            # Best-effort mirror to MariaDB global_bans (secondary DB) without modifying its schema.
+            # MariaDB: global_bans (user_id, reason, banned_by_user_id, source, report_id, created_at, updated_at).
+            # Best-effort; does not change Postgres.
             if maria_mirror is None:
                 log.warning(
                     "MariaDB mirroring not available (maria_mirror module not loaded). "
