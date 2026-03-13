@@ -178,6 +178,12 @@ async def init_tables(pool: asyncpg.Pool) -> None:
             )
         """)
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "Master key" (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                key TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS "Global banlist" (
                 user_id TEXT PRIMARY KEY,
                 reason TEXT NOT NULL
@@ -342,6 +348,38 @@ async def admin_auth_set(username: str, password: str) -> None:
         )
 
 
+
+# ----------------------------
+# Master API key
+# ----------------------------
+async def master_key_get() -> Optional[str]:
+    """
+    Return the configured master API key (if any).
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT key FROM "Master key" WHERE id = 1')
+    return row["key"] if row else None
+
+
+async def master_key_set(key: Optional[str]) -> None:
+    """
+    Set or clear the master API key. If key is None or empty, the master key is removed.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if not key:
+            await conn.execute('DELETE FROM "Master key" WHERE id = 1')
+        else:
+            await conn.execute(
+                """
+                INSERT INTO "Master key" (id, key)
+                VALUES (1, $1)
+                ON CONFLICT (id) DO UPDATE SET key = EXCLUDED.key
+                """,
+                key,
+            )
+
 # ----------------------------
 # Known scammers
 # ----------------------------
@@ -373,16 +411,43 @@ async def scammers_replace_all(data: Dict[str, str]) -> None:
 
 
 async def scammer_upsert(user_id: str, reason: str) -> None:
+<<<<<<< Updated upstream
     """Add or update a single user in the Global banlist (used when a ban request is approved)."""
+=======
+    """
+    Insert or update a single scammer record.
+    """
+>>>>>>> Stashed changes
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
+<<<<<<< Updated upstream
             INSERT INTO "Global banlist" (user_id, reason) VALUES ($1, $2)
             ON CONFLICT (user_id) DO UPDATE SET reason = EXCLUDED.reason
             """,
             user_id,
             (reason or "Approved ban request").strip() or "Approved ban request",
+=======
+            INSERT INTO "Global banlist" (user_id, reason)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET reason = EXCLUDED.reason
+            """,
+            user_id,
+            reason,
+        )
+
+
+async def scammer_delete(user_id: str) -> None:
+    """
+    Delete a single scammer record.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            'DELETE FROM "Global banlist" WHERE user_id = $1',
+            user_id,
+>>>>>>> Stashed changes
         )
 
 

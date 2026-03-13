@@ -134,6 +134,24 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None, alias=
 
     return meta
 
+
+async def require_master_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> str:
+    """
+    Dependency that ensures the caller is using the configured master API key.
+    This bypasses normal per-partner restrictions and is intended only for
+    fully privileged management endpoints.
+    """
+    if not x_api_key:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
+
+    master_key = await db.master_key_get()
+    if not master_key or x_api_key != master_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized for master operations",
+        )
+    return x_api_key
+
 async def require_admin_auth(credentials: HTTPBasicCredentials = Depends(_admin_auth_scheme)) -> str:
     p = await db.admin_auth_get(credentials.username)
     if not p or p != credentials.password:
@@ -734,6 +752,21 @@ ADMIN_HTML = """<!DOCTYPE html>
       <tbody id="keysBody"></tbody>
     </table>
   </section>
+  <section>
+    <h2>Master API key</h2>
+    <p>Only this key will be able to call the fully privileged API endpoints.</p>
+    <div class="form-row">
+      <label>Current</label>
+      <input type="text" id="masterKeyDisplay" class="key-mono" readonly>
+    </div>
+    <div class="form-row">
+      <label>Set key</label>
+      <input type="text" id="masterKeyInput" placeholder="Paste an existing API key" class="key-mono" size="28">
+      <button type="button" class="primary" id="btnSetMaster">Save</button>
+      <button type="button" class="danger" id="btnClearMaster">Clear</button>
+    </div>
+    <div id="masterMsg" class="msg"></div>
+  </section>
   <script src="/admin/admin.js"></script>
   
 </div>
@@ -819,6 +852,166 @@ async def admin_delete_key(body: AdminDeleteKeyBody, _user: str = Depends(requir
 async def admin_reload_scammers(_user: str = Depends(require_admin_auth)):
     await load_scammers_db()
     return {"ok": True, "known_scammers_count": len(_KNOWN_SCAMMERS)}
+
+
+class AdminMasterKeyBody(BaseModel):
+    key: Optional[str] = None
+
+
+@app.get("/admin/master-key")
+async def admin_get_master_key(_user: str = Depends(require_admin_auth)):
+    """
+    Return the currently configured master API key (masked), if any.
+    """
+    master_key = await db.master_key_get()
+    return {
+        "key": master_key,
+        "key_masked": _mask_api_key(master_key) if master_key else None,
+    }
+
+
+@app.post("/admin/master-key")
+async def admin_set_master_key(body: AdminMasterKeyBody, _user: str = Depends(require_admin_auth)):
+    """
+    Set or clear the master API key. When setting, the key must already exist
+    in the normal API keys table.
+    """
+    key = (body.key or "").strip()
+    if key:
+        meta = await db.api_key_get(key)
+        if not meta:
+            raise HTTPException(status_code=400, detail="API key not found")
+        await db.master_key_set(key)
+        return {"ok": True, "key": key}
+
+    # Clear master key
+    await db.master_key_set(None)
+    return {"ok": True, "key": None}
+
+
+# ----------------------------
+# Master key full-access endpoints
+# ----------------------------
+class RootScammerBody(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=128)
+    reason: str = Field(..., min_length=1, max_length=2048)
+
+
+@app.get("/root/api-keys")
+async def root_list_api_keys(_master: str = Depends(require_master_api_key)):
+    """
+    List all API keys. Requires the configured master API key.
+    """
+    api_keys = await db.api_key_get_all()
+    keys = [
+        {
+            "key": k,
+            "key_masked": _mask_api_key(k),
+            "label": m.get("label") or "",
+            "expires_at": m.get("expires_at") or "",
+        }
+        for k, m in api_keys.items()
+    ]
+    return {"keys": keys}
+
+
+@app.post("/root/api-keys")
+async def root_add_api_key(body: AdminAddKeyBody, _master: str = Depends(require_master_api_key)):
+    """
+    Create a new API key. Requires the configured master API key.
+    """
+    key = body.key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="key required")
+    existing = await db.api_key_get(key)
+    if existing:
+        raise HTTPException(status_code=400, detail="Key already exists")
+    try:
+        _parse_utc_iso_z(body.expires_at)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid expires_at (use ISO UTC, e.g. 2026-12-31T23:59:59Z)",
+        )
+    await db.api_key_set(key, body.expires_at.strip(), (body.label or "").strip())
+    return {"ok": True, "key": key}
+
+
+@app.patch("/root/api-keys")
+async def root_update_api_key(body: AdminUpdateKeyBody, _master: str = Depends(require_master_api_key)):
+    """
+    Update label and/or expiry for an existing API key. Requires the master key.
+    """
+    key = body.key.strip()
+    meta = await db.api_key_get(key)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Key not found")
+    label = meta.get("label", "").strip() if body.label is None else body.label.strip()
+    expires_at = meta.get("expires_at", "") if body.expires_at is None else body.expires_at.strip()
+    if body.expires_at is not None:
+        try:
+            _parse_utc_iso_z(expires_at)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid expires_at")
+    await db.api_key_set(key, expires_at, label)
+    return {"ok": True}
+
+
+@app.delete("/root/api-keys")
+async def root_delete_api_key(body: AdminDeleteKeyBody, _master: str = Depends(require_master_api_key)):
+    """
+    Delete an API key. Requires the master key.
+    """
+    key = body.key.strip()
+    if not await db.api_key_get(key):
+        raise HTTPException(status_code=404, detail="Key not found")
+    await db.api_key_delete(key)
+    return {"ok": True}
+
+
+@app.get("/root/scammers")
+async def root_list_scammers(_master: str = Depends(require_master_api_key)):
+    """
+    List all scammers from the global banlist. Requires the master key.
+    """
+    scammers = await db.scammers_get_all()
+    items = [{"user_id": uid, "reason": reason} for uid, reason in scammers.items()]
+    return {"count": len(items), "scammers": items}
+
+
+@app.post("/root/scammers")
+async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require_master_api_key)):
+    """
+    Add or update a single scammer entry in the global banlist. Requires the master key.
+    """
+    uid = _normalize_user_id(body.user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason required")
+
+    await db.scammer_upsert(uid, reason)
+    await load_scammers_db()
+    return {"ok": True, "user_id": uid}
+
+
+@app.delete("/root/scammers/{user_id}")
+async def root_delete_scammer(user_id: str, _master: str = Depends(require_master_api_key)):
+    """
+    Remove a scammer from the global banlist by user_id. Requires the master key.
+    """
+    uid = _normalize_user_id(user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+
+    existing = await db.scammer_get(uid)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Scammer not found")
+
+    await db.scammer_delete(uid)
+    await load_scammers_db()
+    return {"ok": True, "user_id": uid}
 
 # ----------------------------
 # 2FA endpoints

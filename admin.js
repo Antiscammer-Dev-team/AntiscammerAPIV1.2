@@ -52,7 +52,10 @@
   function showMain(show) {
     document.getElementById('loginSection').style.display = show ? 'none' : 'block';
     document.getElementById('mainContent').classList.toggle('show', show);
-    if (show) loadKeys();
+    if (show) {
+      loadKeys();
+      loadMasterKey();
+    }
   }
 
   document.getElementById('btnLogout').onclick = () => {
@@ -85,6 +88,17 @@
       showMsg('listMsg', '', true);
     } catch (e) {
       showMsg('listMsg', e.message, false);
+    }
+  }
+
+  async function loadMasterKey() {
+    try {
+      const data = await api('GET', '/admin/master-key');
+      const input = document.getElementById('masterKeyDisplay');
+      input.value = data.key_masked || '';
+      showMsg('masterMsg', '', true);
+    } catch (e) {
+      showMsg('masterMsg', e.message, false);
     }
   }
 
@@ -128,6 +142,31 @@
       loadKeys();
     } catch (e) {
       showMsg('addMsg', e.message, false);
+    }
+  };
+
+  document.getElementById('btnSetMaster').onclick = async () => {
+    const key = document.getElementById('masterKeyInput').value.trim();
+    if (!key) { showMsg('masterMsg', 'Enter an API key to set as master.', false); return; }
+    try {
+      await api('POST', '/admin/master-key', { key });
+      document.getElementById('masterKeyInput').value = '';
+      await loadMasterKey();
+      showMsg('masterMsg', 'Master key updated.', true);
+    } catch (e) {
+      showMsg('masterMsg', e.message, false);
+    }
+  };
+
+  document.getElementById('btnClearMaster').onclick = async () => {
+    if (!confirm('Clear the current master API key?')) return;
+    try {
+      await api('POST', '/admin/master-key', { key: null });
+      document.getElementById('masterKeyInput').value = '';
+      await loadMasterKey();
+      showMsg('masterMsg', 'Master key cleared.', true);
+    } catch (e) {
+      showMsg('masterMsg', e.message, false);
     }
   };
 
