@@ -19,6 +19,19 @@ _pool: Optional[aiomysql.Pool] = None
 _lock = asyncio.Lock()
 
 
+def _as_int_or_none(value: Optional[str]) -> Optional[int]:
+  """If value is a string of digits (e.g. Discord user ID), return int; else None. For integer columns."""
+  if value is None:
+      return None
+  s = (value or "").strip()
+  if not s or not s.isdigit():
+      return None
+  try:
+      return int(s)
+  except ValueError:
+      return None
+
+
 def _enabled() -> bool:
   """Return True if we have enough configuration to talk to the secondary MariaDB."""
   return bool(MARIADB_HOST and MARIADB_USER and MARIADB_PASSWORD and MARIADB_DB)
@@ -104,6 +117,8 @@ async def mirror_global_ban_insert(
   try:
       async with pool.acquire() as conn:
           async with conn.cursor() as cur:
+              # banned_by_user_id is INTEGER in DB; pass int or None (labels like "Modora Signal" -> None)
+              banned_by_int = _as_int_or_none(banned_by_user_id)
               await cur.execute(
                   """
                   INSERT INTO global_bans (
@@ -117,7 +132,7 @@ async def mirror_global_ban_insert(
                   )
                   VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
                   """,
-                  (user_id, reason, banned_by_user_id, source, report_id or None),
+                  (user_id, reason, banned_by_int, source, report_id or None),
               )
       log.info(
           "Mirrored global ban to MariaDB: user_id=%s report_id=%s source=%s",

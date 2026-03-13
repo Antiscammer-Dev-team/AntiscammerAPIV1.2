@@ -905,6 +905,7 @@ class RootScammerBody(BaseModel):
     user_id: str = Field(..., min_length=1, max_length=128)
     reason: str = Field(..., min_length=1, max_length=2048)
     report_id: Optional[str] = Field(default=None, max_length=128)  # e.g. "RPT_000000"
+    banned_by_user_id: Optional[str] = Field(default=None, max_length=64)  # Discord user ID (numeric) for MariaDB integer column
 
 
 class GlobalBanBody(BaseModel):
@@ -1023,12 +1024,14 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
             meta = await db.api_key_get(_master)
             label = (meta.get("label") or "root_api").strip() if meta else "root_api"
             report_id_str = (body.report_id or "").strip()
+            # MariaDB banned_by_user_id is INTEGER; pass numeric string from body or label (mirror stores NULL for non-numeric)
+            banned_by = (body.banned_by_user_id or "").strip() or label
             await maria_mirror.mirror_global_ban_insert(
                 user_id=uid,
                 reason=reason,
-                banned_by_user_id=label,
+                banned_by_user_id=banned_by,
                 source="root_scammers",
-                report_id=report_id_str,  # str e.g. "RPT_000000"
+                report_id=report_id_str,
             )
             log.info("Added user_id=%s to MariaDB global_bans (root/scammers)", uid)
         except Exception:
