@@ -68,12 +68,14 @@ async def mirror_global_ban_insert(
     reason: str,
     banned_by_user_id: str,
     source: str,
-    report_id: str,
+    report_id: str,  # string e.g. "RPT_000000" or "" for none
 ) -> None:
   """
   Insert into MariaDB global_bans only (MariaDB-specific schema).
   Postgres uses a different table/schema ("Global banlist": user_id, reason only) in db.py.
   This function does not touch Postgres.
+
+  report_id: str, e.g. "RPT_000000" or "" (stored as NULL when empty).
 
   MariaDB global_bans schema (already created on the MariaDB side):
 
