@@ -640,6 +640,10 @@ async def lifespan(app: FastAPI):
     await load_scammers_db()
     api_keys_count = len(await db.api_key_get_all())
     log.info("LOAD PID=%s scammers_loaded=%d api_keys=%d", os.getpid(), len(_KNOWN_SCAMMERS), api_keys_count)
+    if maria_mirror is None:
+        log.warning("MariaDB mirror not loaded (install aiomysql?). Bans will only be written to Postgres.")
+    else:
+        log.info("MariaDB mirror module loaded; global_bans will be written when MARIADB_* env is set.")
     timeout = aiohttp.ClientTimeout(total=20)
     app.state.http_session = aiohttp.ClientSession(timeout=timeout)
     try:
@@ -1005,11 +1009,15 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
     if not reason:
         raise HTTPException(status_code=400, detail="reason required")
 
-    # Postgres: "Global banlist" (user_id, reason only). MariaDB: global_bans (full schema) below.
+    # Postgres: "Global banlist" (user_id, reason only).
     await db.scammer_upsert(uid, reason)
     await load_scammers_db()
+    log.info("Added user_id=%s to Postgres Global banlist (root/scammers)", uid)
 
-    if maria_mirror is not None:
+    # MariaDB: global_bans (full schema). Same ban must appear in both DBs.
+    if maria_mirror is None:
+        log.warning("MariaDB mirror skipped for root/scammers (module not loaded). Only Postgres was updated.")
+    else:
         try:
             meta = await db.api_key_get(_master)
             label = (meta.get("label") or "root_api").strip() if meta else "root_api"
@@ -1020,8 +1028,9 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
                 source="root_scammers",
                 report_id="",
             )
+            log.info("Added user_id=%s to MariaDB global_bans (root/scammers)", uid)
         except Exception:
-            log.exception("Failed to mirror global ban to MariaDB for user_id=%s (root/scammers)", uid)
+            log.exception("Failed to add user_id=%s to MariaDB global_bans (root/scammers)", uid)
 
     return {"ok": True, "user_id": uid}
 
