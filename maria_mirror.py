@@ -88,7 +88,7 @@ async def mirror_global_ban_insert(
   Postgres uses a different table/schema ("Global banlist": user_id, reason only) in db.py.
   This function does not touch Postgres.
 
-  report_id: str, e.g. "RPT_000000" or "" (stored as NULL when empty).
+  report_id: str, e.g. "RPT-00006" or "RPT_000000"; stored as VARCHAR. Use "" for NULL.
 
   MariaDB global_bans schema (already created on the MariaDB side):
 
@@ -96,7 +96,7 @@ async def mirror_global_ban_insert(
           id                BIGINT AUTO_INCREMENT PRIMARY KEY,
           user_id           VARCHAR(...) NOT NULL,
           reason            TEXT NOT NULL,
-          banned_by_user_id VARCHAR(...) NULL,
+          banned_by_user_id INT/BIGINT NULL,
           source            VARCHAR(...) NULL,
           report_id         VARCHAR(...) NULL,
           created_at        DATETIME NOT NULL,
@@ -117,8 +117,9 @@ async def mirror_global_ban_insert(
   try:
       async with pool.acquire() as conn:
           async with conn.cursor() as cur:
-              # banned_by_user_id is INTEGER in DB; pass int or None (labels like "Modora Signal" -> None)
+              # banned_by_user_id is INTEGER in DB; report_id is VARCHAR (string)
               banned_by_int = _as_int_or_none(banned_by_user_id)
+              report_id_val = (report_id or "").strip() or None  # empty string -> NULL
               await cur.execute(
                   """
                   INSERT INTO global_bans (
@@ -132,7 +133,7 @@ async def mirror_global_ban_insert(
                   )
                   VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
                   """,
-                  (user_id, reason, banned_by_int, source, report_id or None),
+                  (user_id, reason, banned_by_int, source, report_id_val),
               )
       log.info(
           "Mirrored global ban to MariaDB: user_id=%s report_id=%s source=%s",
