@@ -7,7 +7,7 @@ from typing import Optional
 
 import aiomysql
 
-log = logging.getLogger("maria_mirror")
+log = logging.getLogger("app")
 
 MARIADB_HOST = os.getenv("MARIADB_HOST", "").strip()
 MARIADB_PORT = int(os.getenv("MARIADB_PORT", "3306"))
