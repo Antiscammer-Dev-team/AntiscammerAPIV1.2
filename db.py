@@ -412,7 +412,13 @@ async def scammers_replace_all(data: Dict[str, str]) -> None:
 
 async def scammer_upsert(user_id: str, reason: str) -> None:
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     """Add or update a single user in the Global banlist (used when a ban request is approved)."""
+=======
+    """
+    Insert or update a single scammer record.
+    """
+>>>>>>> Stashed changes
 =======
     """
     Insert or update a single scammer record.
@@ -423,12 +429,15 @@ async def scammer_upsert(user_id: str, reason: str) -> None:
         await conn.execute(
             """
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
             INSERT INTO "Global banlist" (user_id, reason) VALUES ($1, $2)
             ON CONFLICT (user_id) DO UPDATE SET reason = EXCLUDED.reason
             """,
             user_id,
             (reason or "Approved ban request").strip() or "Approved ban request",
 =======
+=======
+>>>>>>> Stashed changes
             INSERT INTO "Global banlist" (user_id, reason)
             VALUES ($1, $2)
             ON CONFLICT (user_id) DO UPDATE SET reason = EXCLUDED.reason
@@ -447,6 +456,9 @@ async def scammer_delete(user_id: str) -> None:
         await conn.execute(
             'DELETE FROM "Global banlist" WHERE user_id = $1',
             user_id,
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
         )
 
