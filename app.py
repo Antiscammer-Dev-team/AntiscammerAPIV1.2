@@ -902,6 +902,15 @@ class RootScammerBody(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2048)
 
 
+class GlobalBanBody(BaseModel):
+    """Body for staff global-ban: add user to global banlist and mirror to MariaDB global_bans."""
+    user_id: str = Field(..., min_length=1, max_length=128)
+    reason: str = Field(..., min_length=1, max_length=2048)
+    report_id: Optional[str] = Field(default=None, max_length=128)
+    banned_by_user_id: Optional[str] = Field(default=None, max_length=128)
+    source: Optional[str] = Field(default=None, max_length=128)
+
+
 @app.get("/root/api-keys")
 async def root_list_api_keys(_master: str = Depends(require_master_api_key)):
     """
@@ -1017,6 +1026,38 @@ async def root_delete_scammer(user_id: str, _master: str = Depends(require_maste
     await db.scammer_delete(uid)
     await load_scammers_db()
     return {"ok": True, "user_id": uid}
+
+
+@app.post("/staff/signal/antiscam/global-ban")
+async def staff_global_ban(body: GlobalBanBody, _master: str = Depends(require_master_api_key)):
+    """
+    Add a user to the global banlist (Postgres) and mirror to MariaDB global_bans.
+    Used by the staff dashboard when dispatching a global ban. Requires master API key.
+    """
+    uid = _normalize_user_id(body.user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason required")
+
+    await db.scammer_upsert(uid, reason)
+    await load_scammers_db()
+
+    if maria_mirror is not None:
+        try:
+            await maria_mirror.mirror_global_ban_insert(
+                user_id=uid,
+                reason=reason,
+                banned_by_user_id=(body.banned_by_user_id or "").strip() or "staff",
+                source=(body.source or "").strip() or "staff_signal",
+                report_id=(body.report_id or "").strip() or "",
+            )
+        except Exception:
+            log.exception("Failed to mirror global ban to MariaDB for user_id=%s", uid)
+
+    return {"ok": True, "user_id": uid}
+
 
 # ----------------------------
 # 2FA endpoints
