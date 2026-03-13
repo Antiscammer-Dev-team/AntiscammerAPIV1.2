@@ -996,7 +996,7 @@ async def root_list_scammers(_master: str = Depends(require_master_api_key)):
 @app.post("/root/scammers")
 async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require_master_api_key)):
     """
-    Add or update a single scammer entry in the global banlist. Requires the master key.
+    Add or update a single scammer entry in the global banlist and mirror to MariaDB global_bans. Requires the master key.
     """
     uid = _normalize_user_id(body.user_id)
     if not uid:
@@ -1007,6 +1007,21 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
 
     await db.scammer_upsert(uid, reason)
     await load_scammers_db()
+
+    if maria_mirror is not None:
+        try:
+            meta = await db.api_key_get(_master)
+            label = (meta.get("label") or "root_api").strip() if meta else "root_api"
+            await maria_mirror.mirror_global_ban_insert(
+                user_id=uid,
+                reason=reason,
+                banned_by_user_id=label,
+                source="root_scammers",
+                report_id="",
+            )
+        except Exception:
+            log.exception("Failed to mirror global ban to MariaDB for user_id=%s (root/scammers)", uid)
+
     return {"ok": True, "user_id": uid}
 
 
