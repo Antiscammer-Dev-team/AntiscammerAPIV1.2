@@ -145,3 +145,19 @@ async def mirror_global_ban_insert(
           user_id, report_id,
       )
 
+
+async def mirror_global_ban_delete(user_id: str) -> None:
+  """Remove the global_bans row for this user_id (mirror of Postgres delete)."""
+  if not _enabled():
+      return
+  pool = await _get_pool()
+  if pool is None:
+      return
+  try:
+      async with pool.acquire() as conn:
+          async with conn.cursor() as cur:
+              await cur.execute("DELETE FROM global_bans WHERE user_id = %s", (user_id,))
+      log.info("Removed user_id=%s from MariaDB global_bans", user_id)
+  except Exception:
+      log.exception("MariaDB global_bans delete failed: user_id=%s", user_id)
+

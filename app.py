@@ -1051,12 +1051,17 @@ class RootDeleteScammerBody(BaseModel):
 
 
 async def _do_root_delete_scammer(uid: str) -> None:
-    """Shared delete logic: Postgres + reload cache. Caller validates uid."""
+    """Shared delete logic: Postgres + reload cache + MariaDB mirror. Caller validates uid."""
     existing = await db.scammer_get(uid)
     if not existing:
         raise HTTPException(status_code=404, detail="Scammer not found")
     await db.scammer_delete(uid)
     await load_scammers_db()
+    if maria_mirror is not None:
+        try:
+            await maria_mirror.mirror_global_ban_delete(uid)
+        except Exception:
+            log.exception("Failed to remove user_id=%s from MariaDB global_bans", uid)
 
 
 @app.delete("/root/scammers")
