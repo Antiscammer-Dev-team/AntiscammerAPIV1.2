@@ -1065,14 +1065,19 @@ async def _do_root_delete_scammer(uid: str) -> None:
 
 
 @app.delete("/root/scammers")
-async def root_delete_scammer_by_body(body: RootDeleteScammerBody, _master: str = Depends(require_master_api_key)):
+async def root_delete_scammer_by_body(
+    _master: str = Depends(require_master_api_key),
+    user_id: Optional[str] = None,  # query param: ?user_id=...
+    body: Optional[RootDeleteScammerBody] = None,  # or JSON body {"user_id": "..."}
+):
     """
-    Remove a scammer by user_id (in request body). Use when client sends DELETE /root/scammers with JSON body.
+    Remove a scammer by user_id. Accepts user_id in query (?user_id=...) or in JSON body.
     Requires the master key.
     """
-    uid = _normalize_user_id(body.user_id)
+    raw = (user_id or "").strip() if user_id else (body.user_id if body else "")
+    uid = _normalize_user_id(raw)
     if not uid:
-        raise HTTPException(status_code=400, detail="Invalid user_id")
+        raise HTTPException(status_code=400, detail="Invalid or missing user_id (use query ?user_id=... or body)")
     await _do_root_delete_scammer(uid)
     return {"ok": True, "user_id": uid}
 
