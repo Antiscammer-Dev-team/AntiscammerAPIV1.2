@@ -1045,21 +1045,42 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
     return {"ok": True, "user_id": uid}
 
 
+class RootDeleteScammerBody(BaseModel):
+    """Body for DELETE /root/scammers when user_id is not in the path."""
+    user_id: str = Field(..., min_length=1, max_length=128)
+
+
+async def _do_root_delete_scammer(uid: str) -> None:
+    """Shared delete logic: Postgres + reload cache. Caller validates uid."""
+    existing = await db.scammer_get(uid)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Scammer not found")
+    await db.scammer_delete(uid)
+    await load_scammers_db()
+
+
+@app.delete("/root/scammers")
+async def root_delete_scammer_by_body(body: RootDeleteScammerBody, _master: str = Depends(require_master_api_key)):
+    """
+    Remove a scammer by user_id (in request body). Use when client sends DELETE /root/scammers with JSON body.
+    Requires the master key.
+    """
+    uid = _normalize_user_id(body.user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    await _do_root_delete_scammer(uid)
+    return {"ok": True, "user_id": uid}
+
+
 @app.delete("/root/scammers/{user_id}")
 async def root_delete_scammer(user_id: str, _master: str = Depends(require_master_api_key)):
     """
-    Remove a scammer from the global banlist by user_id. Requires the master key.
+    Remove a scammer from the global banlist by user_id (in path). Requires the master key.
     """
     uid = _normalize_user_id(user_id)
     if not uid:
         raise HTTPException(status_code=400, detail="Invalid user_id")
-
-    existing = await db.scammer_get(uid)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Scammer not found")
-
-    await db.scammer_delete(uid)
-    await load_scammers_db()
+    await _do_root_delete_scammer(uid)
     return {"ok": True, "user_id": uid}
 
 
