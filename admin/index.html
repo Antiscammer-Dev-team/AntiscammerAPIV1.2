@@ -112,15 +112,17 @@
     <div id="tabUsers" class="tab-panel">
       <section>
         <h2>Add admin user</h2>
-        <div class="form-row">
-          <label>Username</label>
-          <input type="text" id="newUserUsername">
-        </div>
-        <div class="form-row">
-          <label>Password</label>
-          <input type="password" id="newUserPassword">
-          <button type="button" class="primary" id="btnAddUser">Add</button>
-        </div>
+        <form id="addUserForm" autocomplete="off" onsubmit="return false;">
+          <div class="form-row">
+            <label>Username</label>
+            <input type="text" id="newUserUsername" autocomplete="username">
+          </div>
+          <div class="form-row">
+            <label>Password</label>
+            <input type="password" id="newUserPassword" autocomplete="new-password">
+            <button type="button" class="primary" id="btnAddUser">Add</button>
+          </div>
+        </form>
         <div id="userMsg" class="msg"></div>
       </section>
       <section>

@@ -19,7 +19,17 @@
     const text = await r.text();
     let data = null;
     try { data = JSON.parse(text); } catch (_) {}
-    if (!r.ok) throw new Error(data?.detail || text || r.status);
+    if (!r.ok) {
+      let msg = text || String(r.status);
+      if (data?.detail) {
+        if (Array.isArray(data.detail)) {
+          msg = data.detail.map(d => (d.loc ? d.loc.join('.') + ': ' : '') + (d.msg || '')).join('; ');
+        } else {
+          msg = String(data.detail);
+        }
+      }
+      throw new Error(msg);
+    }
     return data;
   }
 
