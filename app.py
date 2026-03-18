@@ -1053,11 +1053,11 @@ async def admin_add_url(body: UrlListBody, request: Request, _user: str = Depend
     if not domain:
         raise HTTPException(status_code=400, detail="domain required")
     try:
-        await db.url_list_upsert(domain, body.type, body.reason)
+        await db.url_list_upsert(domain, body.url_type, body.reason)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await load_urls_db()
-    await db.admin_audit_log(_user, "url_add", domain, {"type": body.type}, _get_client_ip(request))
+    await db.admin_audit_log(_user, "url_add", domain, {"type": body.url_type}, _get_client_ip(request))
     return {"ok": True, "domain": domain}
 
 
@@ -1304,7 +1304,7 @@ class RootScammerBody(BaseModel):
 class UrlListBody(BaseModel):
     """Body for adding/updating a URL in the safe/scam list."""
     domain: str = Field(..., min_length=1, max_length=256)
-    type: str = Field(..., pattern="^(safe|scam)$")
+    url_type: str = Field(..., pattern="^(safe|scam)$", alias="type")
     reason: str = Field(default="", max_length=512)
 
 
@@ -1519,7 +1519,7 @@ async def root_add_url(body: UrlListBody, _master: str = Depends(require_master_
     if not domain:
         raise HTTPException(status_code=400, detail="domain required")
     try:
-        await db.url_list_upsert(domain, body.type, body.reason)
+        await db.url_list_upsert(domain, body.url_type, body.reason)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await load_urls_db()
