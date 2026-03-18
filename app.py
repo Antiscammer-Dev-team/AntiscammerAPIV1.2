@@ -1047,17 +1047,27 @@ async def admin_list_urls(_user: str = Depends(require_admin_auth)):
 
 
 @app.post("/admin/urls")
-async def admin_add_url(body: UrlListBody, request: Request, _user: str = Depends(require_admin_auth)):
+async def admin_add_url(request: Request, _user: str = Depends(require_admin_auth)):
     """Add or update a URL."""
-    domain = body.domain.lower().strip()
-    if not domain:
-        raise HTTPException(status_code=400, detail="domain required")
     try:
-        await db.url_list_upsert(domain, body.url_type, body.reason)
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid or missing JSON body")
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="Body must be a JSON object")
+    domain = (raw.get("domain") or "").strip().lower()
+    url_type = raw.get("url_type") or raw.get("type") or ""
+    reason = (raw.get("reason") or "").strip()[:512]
+    if not domain:
+        raise HTTPException(status_code=422, detail="domain required")
+    if url_type not in ("safe", "scam"):
+        raise HTTPException(status_code=422, detail="url_type must be 'safe' or 'scam'")
+    try:
+        await db.url_list_upsert(domain, url_type, reason)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await load_urls_db()
-    await db.admin_audit_log(_user, "url_add", domain, {"type": body.url_type}, _get_client_ip(request))
+    await db.admin_audit_log(_user, "url_add", domain, {"type": url_type}, _get_client_ip(request))
     return {"ok": True, "domain": domain}
 
 
