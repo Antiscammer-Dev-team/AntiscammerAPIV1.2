@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import aiohttp
 import pyotp
@@ -39,6 +40,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from starlette.requests import Request
@@ -64,6 +66,7 @@ DISCORD_FALSE_POSITIVE_WEBHOOK_URL = (os.getenv("DISCORD_FALSE_POSITIVE_WEBHOOK_
 OLLAMA_BASE_URL = (os.getenv("OLLAMA_BASE_URL") or "https://ollama.com/api").strip().rstrip("/")
 OLLAMA_API_KEY = (os.getenv("OLLAMA_API_KEY") or "").strip()
 OLLAMA_MODEL = (os.getenv("OLLAMA_MODEL") or "gpt-oss:20b-cloud").strip()
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "20"))
 
 # ----------------------------
 # Paths / Storage (file-based storage removed; DB used)
@@ -81,6 +84,24 @@ BAN_REPORT_CDN_PASS = (os.getenv("CDN_PASSWORD") or "").strip()
 # In-memory cache for scammers (loaded from DB at startup / reload)
 # ----------------------------
 _KNOWN_SCAMMERS: Dict[str, str] = {}  # user_id -> reason
+
+# ----------------------------
+# In-memory cache for URLs (safe / scam)
+# ----------------------------
+_KNOWN_SAFE_URLS: Set[str] = set()  # domains marked safe
+_KNOWN_SCAM_URLS: Dict[str, str] = {}  # domain -> reason
+
+# Request metrics for admin dashboard
+_request_count: int = 0
+_request_times: collections.deque = collections.deque(maxlen=100)
+_startup_time: float = 0
+
+# Admin security: rate limit (ip -> list of timestamps), login throttle (ip -> (count, lock_until))
+_admin_rate_limit: Dict[str, collections.deque] = {}
+_admin_login_fails: Dict[str, tuple] = {}  # ip -> (count, lock_until_timestamp)
+_ADMIN_RATE_LIMIT = 60  # requests per minute
+_ADMIN_LOGIN_MAX_FAILS = 5
+_ADMIN_LOGIN_LOCK_SEC = 900  # 15 min
 
 # ----------------------------
 # General helpers
@@ -157,14 +178,41 @@ async def require_master_api_key(x_api_key: Optional[str] = Header(default=None,
         )
     return x_api_key
 
-async def require_admin_auth(credentials: HTTPBasicCredentials = Depends(_admin_auth_scheme)) -> str:
+def _get_client_ip(request: Request) -> str:
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+async def require_admin_auth(
+    request: Request,
+    credentials: HTTPBasicCredentials = Depends(_admin_auth_scheme),
+) -> str:
+    ip = _get_client_ip(request)
+    now = time.time()
+    if ip in _admin_login_fails:
+        _, lock_until = _admin_login_fails[ip]
+        if now < lock_until:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Too many failed logins. Try again later.",
+            )
+        else:
+            del _admin_login_fails[ip]
     p = await db.admin_auth_get(credentials.username)
     if not p or p != credentials.password:
+        cnt, _ = _admin_login_fails.get(ip, (0, 0))
+        cnt += 1
+        lock_until = now + _ADMIN_LOGIN_LOCK_SEC if cnt >= _ADMIN_LOGIN_MAX_FAILS else 0
+        _admin_login_fails[ip] = (cnt, lock_until)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid admin login",
             headers={"WWW-Authenticate": "Basic realm=\"Admin\""},
         )
+    if ip in _admin_login_fails:
+        del _admin_login_fails[ip]
     return credentials.username
 
 # ----------------------------
@@ -194,6 +242,28 @@ async def load_scammers_db() -> None:
     except Exception:
         log.exception("Failed to load scammers from DB")
         _KNOWN_SCAMMERS = {}
+
+
+async def load_urls_db() -> None:
+    global _KNOWN_SAFE_URLS, _KNOWN_SCAM_URLS
+    try:
+        data = await db.url_list_get_all()
+        safe = set()
+        scam: Dict[str, str] = {}
+        for domain, meta in data.items():
+            t = meta.get("type", "").lower()
+            reason = meta.get("reason", "") or ""
+            if t == "safe":
+                safe.add(domain)
+            elif t == "scam":
+                scam[domain] = reason
+        _KNOWN_SAFE_URLS = safe
+        _KNOWN_SCAM_URLS = scam
+        log.info("Loaded URLs from DB: %d safe, %d scam", len(_KNOWN_SAFE_URLS), len(_KNOWN_SCAM_URLS))
+    except Exception:
+        log.exception("Failed to load URLs from DB")
+        _KNOWN_SAFE_URLS = set()
+        _KNOWN_SCAM_URLS = {}
 
 # ----------------------------
 # Discord webhook helper
@@ -332,6 +402,47 @@ async def upload_banreport_proof_to_interna(
         return None
 
 # ----------------------------
+# URL extraction and normalization
+# ----------------------------
+_URL_PATTERN = re.compile(
+    r"(?:https?://)?"
+    r"([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)"
+    r"(?::\d+)?"
+    r"(?:/[/\w.\-~:%@?&+=]*)?",
+    re.IGNORECASE,
+)
+# Short domains: discord.gg, bit.ly, goo.su, etc.
+_SHORT_DOMAIN_PATTERN = re.compile(
+    r"\b([a-zA-Z0-9][a-zA-Z0-9-]*\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)\b",
+)
+
+
+def extract_urls_from_text(text: str) -> List[str]:
+    """
+    Extract URLs from text and return normalized domains (lowercase, host only).
+    Handles: https://..., discord.gg/..., bare domain.tld, etc.
+    """
+    if not text or not isinstance(text, str):
+        return []
+    domains: set = set()
+    # Match full URLs (http/https or scheme-relative)
+    for m in _URL_PATTERN.finditer(text):
+        host = m.group(1)
+        if host and len(host) > 1:
+            # Strip www. prefix
+            if host.lower().startswith("www."):
+                host = host[4:]
+            domains.add(host.lower())
+    # Match bare domains (e.g., discord.gg, modora.xyz)
+    for m in _SHORT_DOMAIN_PATTERN.finditer(text):
+        d = m.group(1).lower()
+        if d and "." in d and len(d) < 64:
+            domains.add(d)
+    return sorted(domains)
+
+
+# ----------------------------
 # Scam canonicalize + detect (your existing logic)
 # ----------------------------
 def canonicalize_for_scam_scan(s: str) -> dict:
@@ -403,6 +514,23 @@ async def detect_scam(
         and ob["single_char_line_ratio"] >= 0.70
     )
 
+    # Extract URLs from message and context, build status block for model
+    text_to_scan = text
+    if context_messages:
+        for m in context_messages:
+            text_to_scan += " " + (m.get("content") or "")
+    extracted_domains = extract_urls_from_text(text_to_scan)
+    url_status_lines: List[str] = []
+    for d in extracted_domains:
+        if d in _KNOWN_SCAM_URLS:
+            reason = _KNOWN_SCAM_URLS.get(d, "")
+            url_status_lines.append(f"- {d}: FLAGGED AS SCAM in our database. {reason} Model considers this when classifying.")
+        elif d in _KNOWN_SAFE_URLS:
+            url_status_lines.append(f"- {d}: WHITELISTED. It's clear. Do not flag.")
+        else:
+            url_status_lines.append(f"- {d}: Not in our database. Evaluate from context.")
+    url_status_block = "\n".join(url_status_lines) if url_status_lines else "No URLs detected in message."
+
     prompt = f"""You are a classifier that detects Discord scam messages.
 Respond ONLY with a JSON object with:
 
@@ -425,30 +553,17 @@ If a message says "share your questions below" (or similar) and contains a link 
 
 If ANYTHING in the message says "SQL" or "DB" or any other database and does not have other indicators thats a hard 100% not scam
 
-
 User offering free food is not a scam
-
 Saying a user needs a token is not a scam. Asking for a discord token or key is a scam
-
 "Setting up groups" Is just someone configering a plugin or a tool. NOT A SCAM
-
 Someone stating they have existing tickets or coins is not a scam
-
 Support is a thing. If someone is trying to help a user and asking for lua files or remote connection. Thats not a scam. Thats support
-
 Anything related to a admin menu is not a scam.
-
 if someone is encouraging someone to buy anything named quazar x its safe. Quazar is a fivem addon seller.
-
-If one of the links listed below is in the message @ there are no other indecators. Its not a scam
-modora.xyz
-sassguard.app
-antiscammer.app
-google.com
-bing.com
-
-
 Bot commands MUST BE IGNORED. Commands for example are -dep , !dep , !ban , --help, -Msg and more
+
+URL status from our database (use this to inform your decision; you make the final classification):
+{url_status_block}
 
 Inputs Provided:
 {context_block or "[no context]"}
@@ -496,7 +611,7 @@ whitespace_ratio: {ob["whitespace_ratio"]}
             url,
             headers=headers,
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=20),
+            timeout=aiohttp.ClientTimeout(total=OLLAMA_TIMEOUT),
         ) as resp:
             if resp.status != 200:
                 raw_txt = await resp.text()
@@ -608,6 +723,10 @@ class BatchLookupRequest(BaseModel):
     user_ids: List[str] = Field(..., min_length=1, max_length=500)
     include_reason: bool = False
 
+
+class UrlCheckRequest(BaseModel):
+    urls: List[str] = Field(..., min_length=1, max_length=100)
+
 class ContextItem(BaseModel):
     created_at: Optional[str] = Field(default=None, description="ISO timestamp")
     author: str = "unknown"
@@ -634,10 +753,13 @@ class TwoFACodeRequest(BaseModel):
 # ----------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _startup_time
+    _startup_time = time.perf_counter()
     pool = await db.init_pool()
     await db.init_tables(pool)
     await db.seed_defaults(pool)
     await load_scammers_db()
+    await load_urls_db()
     api_keys_count = len(await db.api_key_get_all())
     log.info("LOAD PID=%s scammers_loaded=%d api_keys=%d", os.getpid(), len(_KNOWN_SCAMMERS), api_keys_count)
     if maria_mirror is None:
@@ -654,6 +776,11 @@ async def lifespan(app: FastAPI):
         log.info("HTTP session closed")
 
 app = FastAPI(title="AntiScammer Local API (Keyed)", lifespan=lifespan)
+
+_admin_dir = Path(__file__).with_name("admin")
+if _admin_dir.exists():
+    app.mount("/admin/static", StaticFiles(directory=str(_admin_dir), html=True), name="admin_static")
+
 log.info("API booting...")
 
 async def _caller_label(request: Request) -> str:
@@ -671,6 +798,24 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     start = time.perf_counter()
     method = request.method
     path = request.url.path or "/"
+    if path.startswith("/admin") and path not in ("/admin", "/admin/") and not path.startswith("/admin/static"):
+        bypass = False
+        api_key = request.headers.get("X-API-Key")
+        if api_key:
+            meta = await db.api_key_get(api_key)
+            if meta and meta.get("bypass_ratelimit"):
+                bypass = True
+        if not bypass:
+            ip = _get_client_ip(request)
+            now = time.time()
+            if ip not in _admin_rate_limit:
+                _admin_rate_limit[ip] = collections.deque(maxlen=_ADMIN_RATE_LIMIT + 10)
+            q = _admin_rate_limit[ip]
+            while q and now - q[0] > 60:
+                q.popleft()
+            if len(q) >= _ADMIN_RATE_LIMIT:
+                return JSONResponse(status_code=429, content={"detail": "Too many requests", "request_id": request_id})
+            q.append(now)
     try:
         caller = await _caller_label(request)
     except Exception:
@@ -684,8 +829,17 @@ async def request_id_and_timing_middleware(request: Request, call_next):
         response = JSONResponse(status_code=500, content={"detail": "Internal server error", "request_id": request_id})
 
     elapsed_ms = int((time.perf_counter() - start) * 1000)
+    _request_times.append(elapsed_ms)
+    global _request_count
+    _request_count += 1
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Response-Time-Ms"] = str(elapsed_ms)
+
+    # Secure headers for admin
+    if path.startswith("/admin") and not path.startswith("/admin/static"):
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+
     status_code = getattr(response, "status_code", 0) or 0
     log.info("call method=%s path=%s status=%s time_ms=%s caller=%s request_id=%s", method, path, status_code, elapsed_ms, caller, request_id)
     return response
@@ -784,11 +938,17 @@ ADMIN_HTML = """<!DOCTYPE html>
 """
 
 @app.get("/admin", response_class=HTMLResponse)
+@app.get("/admin/", response_class=HTMLResponse)
 async def admin_page():
+    index_path = Path(__file__).with_name("admin").joinpath("index.html")
+    if index_path.exists():
+        return HTMLResponse(index_path.read_text(encoding="utf-8"))
     return HTMLResponse(ADMIN_HTML)
+
 
 @app.get("/admin/admin.js")
 async def admin_js():
+    """Legacy: serve admin.js from project root for fallback HTML."""
     js_path = Path(__file__).with_name("admin.js")
     return Response(content=js_path.read_text(encoding="utf-8"), media_type="application/javascript")
 
@@ -796,7 +956,13 @@ async def admin_js():
 async def admin_list_keys(_user: str = Depends(require_admin_auth)):
     api_keys = await db.api_key_get_all()
     keys = [
-        {"key": k, "key_masked": _mask_api_key(k), "label": m.get("label") or "", "expires_at": m.get("expires_at") or ""}
+        {
+            "key": k,
+            "key_masked": _mask_api_key(k),
+            "label": m.get("label") or "",
+            "expires_at": m.get("expires_at") or "",
+            "bypass_ratelimit": m.get("bypass_ratelimit", False),
+        }
         for k, m in api_keys.items()
     ]
     return {"keys": keys}
@@ -809,6 +975,7 @@ class AdminAddKeyBody(BaseModel):
     key: str = Field(..., min_length=4)
     label: str = ""
     expires_at: str = "3072-12-31T23:59:59Z"
+    bypass_ratelimit: bool = False
 
 @app.post("/admin/keys")
 async def admin_add_key(body: AdminAddKeyBody, _user: str = Depends(require_admin_auth)):
@@ -822,13 +989,19 @@ async def admin_add_key(body: AdminAddKeyBody, _user: str = Depends(require_admi
         _parse_utc_iso_z(body.expires_at)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid expires_at (use ISO UTC, e.g. 2026-12-31T23:59:59Z)")
-    await db.api_key_set(key, body.expires_at.strip(), (body.label or "").strip())
+    await db.api_key_set(
+        key,
+        body.expires_at.strip(),
+        (body.label or "").strip(),
+        bypass_ratelimit=body.bypass_ratelimit,
+    )
     return {"ok": True, "key": key}
 
 class AdminUpdateKeyBody(BaseModel):
     key: str = Field(..., min_length=4)
     label: Optional[str] = None
     expires_at: Optional[str] = None
+    bypass_ratelimit: Optional[bool] = None
 
 @app.patch("/admin/keys")
 async def admin_update_key(body: AdminUpdateKeyBody, _user: str = Depends(require_admin_auth)):
@@ -838,12 +1011,13 @@ async def admin_update_key(body: AdminUpdateKeyBody, _user: str = Depends(requir
         raise HTTPException(status_code=404, detail="Key not found")
     label = meta.get("label", "").strip() if body.label is None else body.label.strip()
     expires_at = meta.get("expires_at", "") if body.expires_at is None else body.expires_at.strip()
+    bypass = meta.get("bypass_ratelimit", False) if body.bypass_ratelimit is None else body.bypass_ratelimit
     if body.expires_at is not None:
         try:
             _parse_utc_iso_z(expires_at)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid expires_at")
-    await db.api_key_set(key, expires_at, label)
+    await db.api_key_set(key, expires_at, label, bypass_ratelimit=bypass)
     return {"ok": True}
 
 class AdminDeleteKeyBody(BaseModel):
@@ -861,6 +1035,235 @@ async def admin_delete_key(body: AdminDeleteKeyBody, _user: str = Depends(requir
 async def admin_reload_scammers(_user: str = Depends(require_admin_auth)):
     await load_scammers_db()
     return {"ok": True, "known_scammers_count": len(_KNOWN_SCAMMERS)}
+
+
+# Admin: URL list
+@app.get("/admin/urls")
+async def admin_list_urls(_user: str = Depends(require_admin_auth)):
+    """List all safe/scam URLs."""
+    data = await db.url_list_get_all()
+    items = [{"domain": d, "type": m["type"], "reason": m["reason"]} for d, m in data.items()]
+    return {"ok": True, "count": len(items), "items": items}
+
+
+@app.post("/admin/urls")
+async def admin_add_url(request: Request, _user: str = Depends(require_admin_auth)):
+    """Add or update a URL."""
+    try:
+        raw = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="Invalid or missing JSON body")
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=422, detail="Body must be a JSON object")
+    domain = (raw.get("domain") or "").strip().lower()
+    url_type = raw.get("url_type") or raw.get("type") or ""
+    reason = (raw.get("reason") or "").strip()[:512]
+    if not domain:
+        raise HTTPException(status_code=422, detail="domain required")
+    if url_type not in ("safe", "scam"):
+        raise HTTPException(status_code=422, detail="url_type must be 'safe' or 'scam'")
+    try:
+        await db.url_list_upsert(domain, url_type, reason)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await load_urls_db()
+    await db.admin_audit_log(_user, "url_add", domain, {"type": url_type}, _get_client_ip(request))
+    return {"ok": True, "domain": domain}
+
+
+@app.delete("/admin/urls/{domain}")
+async def admin_delete_url(domain: str, request: Request, _user: str = Depends(require_admin_auth)):
+    """Remove a URL by domain."""
+    domain = domain.lower().strip()
+    if not domain:
+        raise HTTPException(status_code=400, detail="Invalid domain")
+    await db.url_list_delete(domain)
+    await load_urls_db()
+    await db.admin_audit_log(_user, "url_delete", domain, None, _get_client_ip(request))
+    return {"ok": True, "domain": domain}
+
+
+@app.post("/admin/reload-urls")
+async def admin_reload_urls(_user: str = Depends(require_admin_auth)):
+    """Reload URL cache from DB."""
+    await load_urls_db()
+    return {"ok": True, "safe_count": len(_KNOWN_SAFE_URLS), "scam_count": len(_KNOWN_SCAM_URLS)}
+
+
+@app.get("/admin/dashboard")
+async def admin_dashboard(_user: str = Depends(require_admin_auth)):
+    """Aggregated stats for admin overview."""
+    pending_ban = await db.ban_request_list(status="pending", limit=1000)
+    pending_fp = await db.fp_report_list(status="pending", limit=1000)
+    admin_users = await db.admin_auth_get_all()
+    api_keys = await db.api_key_get_all()
+    avg_ms = int(sum(_request_times) / len(_request_times)) if _request_times else 0
+    return {
+        "ok": True,
+        "known_scammers_count": len(_KNOWN_SCAMMERS),
+        "safe_urls_count": len(_KNOWN_SAFE_URLS),
+        "scam_urls_count": len(_KNOWN_SCAM_URLS),
+        "api_keys_count": len(api_keys),
+        "admin_users_count": len(admin_users),
+        "pending_ban_requests": len(pending_ban),
+        "pending_fp_reports": len(pending_fp),
+        "requests_total": _request_count,
+        "avg_response_ms": avg_ms,
+        "uptime_seconds": int(time.perf_counter() - _startup_time),
+        "pid": os.getpid(),
+    }
+
+
+@app.get("/admin/ban-requests")
+async def admin_list_ban_requests(
+    status: Optional[str] = None,
+    limit: int = 100,
+    _user: str = Depends(require_admin_auth),
+):
+    """List ban requests with optional status filter."""
+    items = await db.ban_request_list(status=status, limit=limit)
+    return {"ok": True, "count": len(items), "items": items}
+
+
+@app.post("/admin/ban-requests/{case_id}/resolve")
+async def admin_resolve_ban_request(
+    case_id: str,
+    body: ResolveCaseRequest,
+    _user: str = Depends(require_admin_auth),
+):
+    """Resolve a ban request (approve/reject)."""
+    return await resolve_banrequest_case(case_id, body, {"label": _user})
+
+
+@app.get("/admin/fp-reports")
+async def admin_list_fp_reports(
+    status: Optional[str] = None,
+    limit: int = 100,
+    _user: str = Depends(require_admin_auth),
+):
+    """List false positive reports with optional status filter."""
+    items = await db.fp_report_list(status=status, limit=limit)
+    return {"ok": True, "count": len(items), "items": items}
+
+
+@app.post("/admin/fp-reports/{case_id}/resolve")
+async def admin_resolve_fp_report(
+    case_id: str,
+    body: ResolveCaseRequest,
+    _user: str = Depends(require_admin_auth),
+):
+    """Resolve a false positive report."""
+    return await resolve_falsepositivereport_case(case_id, body, {"label": _user})
+
+
+@app.get("/admin/scammers")
+async def admin_list_scammers(_user: str = Depends(require_admin_auth)):
+    """List scammers."""
+    scammers = await db.scammers_get_all()
+    items = [{"user_id": uid, "reason": reason} for uid, reason in scammers.items()]
+    return {"ok": True, "count": len(items), "items": items}
+
+
+@app.post("/admin/scammers")
+async def admin_add_scammer(body: RootScammerBody, request: Request, _user: str = Depends(require_admin_auth)):
+    """Add a scammer (admin auth)."""
+    uid = _normalize_user_id(body.user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason required")
+    await db.scammer_upsert(uid, reason)
+    await load_scammers_db()
+    if maria_mirror:
+        try:
+            await maria_mirror.mirror_global_ban_insert(
+                user_id=uid,
+                reason=reason,
+                banned_by_user_id=(body.banned_by_user_id or "").strip() or _user,
+                source="admin_dashboard",
+                report_id=(body.report_id or "").strip(),
+            )
+        except Exception:
+            log.exception("Failed to mirror to MariaDB")
+    await db.admin_audit_log(_user, "scammer_add", uid, None, _get_client_ip(request))
+    return {"ok": True, "user_id": uid}
+
+
+@app.delete("/admin/scammers/{user_id}")
+async def admin_delete_scammer(user_id: str, request: Request, _user: str = Depends(require_admin_auth)):
+    """Remove a scammer by path."""
+    uid = _normalize_user_id(user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="Invalid user_id")
+    existing = await db.scammer_get(uid)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Scammer not found")
+    await db.scammer_delete(uid)
+    await load_scammers_db()
+    if maria_mirror:
+        try:
+            await maria_mirror.mirror_global_ban_delete(uid)
+        except Exception:
+            log.exception("Failed to remove from MariaDB")
+    await db.admin_audit_log(_user, "scammer_delete", uid, None, _get_client_ip(request))
+    return {"ok": True, "user_id": uid}
+
+
+class AdminUserBody(BaseModel):
+    username: str = Field(..., min_length=1, max_length=128)
+    password: str = Field(..., min_length=1, max_length=256)
+
+
+class AdminUserPasswordBody(BaseModel):
+    password: str = Field(..., min_length=1, max_length=256)
+
+
+@app.get("/admin/users")
+async def admin_list_users(_user: str = Depends(require_admin_auth)):
+    """List admin users (no passwords)."""
+    users = await db.admin_auth_get_all()
+    return {"ok": True, "count": len(users), "items": users}
+
+
+@app.post("/admin/users")
+async def admin_add_user(body: AdminUserBody, _user: str = Depends(require_admin_auth)):
+    """Add or update an admin user."""
+    username = body.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="username required")
+    await db.admin_auth_set(username, body.password)
+    return {"ok": True, "username": username}
+
+
+@app.delete("/admin/users/{username}")
+async def admin_delete_user(username: str, _user: str = Depends(require_admin_auth)):
+    """Remove an admin user. Cannot delete last admin."""
+    username = username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Invalid username")
+    users = await db.admin_auth_get_all()
+    if len(users) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last admin")
+    await db.admin_auth_delete(username)
+    return {"ok": True, "username": username}
+
+
+@app.patch("/admin/users/{username}/password")
+async def admin_change_password(
+    username: str,
+    body: AdminUserPasswordBody,
+    _user: str = Depends(require_admin_auth),
+):
+    """Change an admin user's password."""
+    username = username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Invalid username")
+    existing = await db.admin_auth_get(username)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+    await db.admin_auth_set(username, body.password)
+    return {"ok": True, "username": username}
 
 
 class AdminMasterKeyBody(BaseModel):
@@ -908,6 +1311,13 @@ class RootScammerBody(BaseModel):
     banned_by_user_id: Optional[str] = Field(default=None, max_length=64)  # Discord user ID (numeric) for MariaDB integer column
 
 
+class UrlListBody(BaseModel):
+    """Body for adding/updating a URL in the safe/scam list."""
+    domain: str = Field(..., min_length=1, max_length=256)
+    url_type: str = Field(..., pattern="^(safe|scam)$")
+    reason: str = Field(default="", max_length=512)
+
+
 class GlobalBanBody(BaseModel):
     """Body for staff global-ban: add user to global banlist and mirror to MariaDB global_bans."""
     user_id: str = Field(..., min_length=1, max_length=128)
@@ -929,6 +1339,7 @@ async def root_list_api_keys(_master: str = Depends(require_master_api_key)):
             "key_masked": _mask_api_key(k),
             "label": m.get("label") or "",
             "expires_at": m.get("expires_at") or "",
+            "bypass_ratelimit": m.get("bypass_ratelimit", False),
         }
         for k, m in api_keys.items()
     ]
@@ -953,7 +1364,12 @@ async def root_add_api_key(body: AdminAddKeyBody, _master: str = Depends(require
             status_code=400,
             detail="Invalid expires_at (use ISO UTC, e.g. 2026-12-31T23:59:59Z)",
         )
-    await db.api_key_set(key, body.expires_at.strip(), (body.label or "").strip())
+    await db.api_key_set(
+        key,
+        body.expires_at.strip(),
+        (body.label or "").strip(),
+        bypass_ratelimit=body.bypass_ratelimit,
+    )
     return {"ok": True, "key": key}
 
 
@@ -968,12 +1384,13 @@ async def root_update_api_key(body: AdminUpdateKeyBody, _master: str = Depends(r
         raise HTTPException(status_code=404, detail="Key not found")
     label = meta.get("label", "").strip() if body.label is None else body.label.strip()
     expires_at = meta.get("expires_at", "") if body.expires_at is None else body.expires_at.strip()
+    bypass = meta.get("bypass_ratelimit", False) if body.bypass_ratelimit is None else body.bypass_ratelimit
     if body.expires_at is not None:
         try:
             _parse_utc_iso_z(expires_at)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid expires_at")
-    await db.api_key_set(key, expires_at, label)
+    await db.api_key_set(key, expires_at, label, bypass_ratelimit=bypass)
     return {"ok": True}
 
 
@@ -1065,14 +1482,19 @@ async def _do_root_delete_scammer(uid: str) -> None:
 
 
 @app.delete("/root/scammers")
-async def root_delete_scammer_by_body(body: RootDeleteScammerBody, _master: str = Depends(require_master_api_key)):
+async def root_delete_scammer_by_body(
+    _master: str = Depends(require_master_api_key),
+    user_id: Optional[str] = None,  # query param: ?user_id=...
+    body: Optional[RootDeleteScammerBody] = None,  # or JSON body {"user_id": "..."}
+):
     """
-    Remove a scammer by user_id (in request body). Use when client sends DELETE /root/scammers with JSON body.
+    Remove a scammer by user_id. Accepts user_id in query (?user_id=...) or in JSON body.
     Requires the master key.
     """
-    uid = _normalize_user_id(body.user_id)
+    raw = (user_id or "").strip() if user_id else (body.user_id if body else "")
+    uid = _normalize_user_id(raw)
     if not uid:
-        raise HTTPException(status_code=400, detail="Invalid user_id")
+        raise HTTPException(status_code=400, detail="Invalid or missing user_id (use query ?user_id=... or body)")
     await _do_root_delete_scammer(uid)
     return {"ok": True, "user_id": uid}
 
@@ -1087,6 +1509,42 @@ async def root_delete_scammer(user_id: str, _master: str = Depends(require_maste
         raise HTTPException(status_code=400, detail="Invalid user_id")
     await _do_root_delete_scammer(uid)
     return {"ok": True, "user_id": uid}
+
+
+# ----------------------------
+# Root: URL list (master key)
+# ----------------------------
+@app.get("/root/urls")
+async def root_list_urls(_master: str = Depends(require_master_api_key)):
+    """List all safe/scam URLs. Requires master key."""
+    data = await db.url_list_get_all()
+    items = [{"domain": d, "type": m["type"], "reason": m["reason"]} for d, m in data.items()]
+    return {"ok": True, "count": len(items), "items": items}
+
+
+@app.post("/root/urls")
+async def root_add_url(body: UrlListBody, _master: str = Depends(require_master_api_key)):
+    """Add or update a URL. Requires master key."""
+    domain = body.domain.lower().strip()
+    if not domain:
+        raise HTTPException(status_code=400, detail="domain required")
+    try:
+        await db.url_list_upsert(domain, body.url_type, body.reason)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await load_urls_db()
+    return {"ok": True, "domain": domain}
+
+
+@app.delete("/root/urls/{domain}")
+async def root_delete_url(domain: str, _master: str = Depends(require_master_api_key)):
+    """Remove a URL by domain. Requires master key."""
+    domain = domain.lower().strip()
+    if not domain:
+        raise HTTPException(status_code=400, detail="Invalid domain")
+    await db.url_list_delete(domain)
+    await load_urls_db()
+    return {"ok": True, "domain": domain}
 
 
 @app.post("/staff/signal/antiscam/global-ban")
@@ -1389,6 +1847,25 @@ async def lookup_batch(req: BatchLookupRequest, _meta: dict = Depends(require_ap
 @app.post("/canonicalize")
 async def canonicalize(req: DetectRequest, _meta: dict = Depends(require_api_key)):
     return canonicalize_for_scam_scan(req.message)
+
+
+@app.post("/url-check")
+async def url_check(req: UrlCheckRequest, _meta: dict = Depends(require_api_key)):
+    """Fast URL lookup against safe/scam DB. No Ollama. Returns status per URL."""
+    results: List[Dict[str, Any]] = []
+    for raw_url in req.urls:
+        domains = extract_urls_from_text(raw_url)
+        if not domains:
+            results.append({"url": raw_url, "domain": None, "status": "unknown"})
+            continue
+        domain = domains[0]
+        if domain in _KNOWN_SCAM_URLS:
+            results.append({"url": raw_url, "domain": domain, "status": "scam", "reason": _KNOWN_SCAM_URLS.get(domain, "")})
+        elif domain in _KNOWN_SAFE_URLS:
+            results.append({"url": raw_url, "domain": domain, "status": "safe"})
+        else:
+            results.append({"url": raw_url, "domain": domain, "status": "unknown"})
+    return {"ok": True, "count": len(results), "items": results}
 
 @app.post("/banrequest/{case_id}/resolve")
 async def resolve_banrequest_case(

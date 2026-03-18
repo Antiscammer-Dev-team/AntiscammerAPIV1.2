@@ -10,7 +10,8 @@ import json
 import logging
 import os
 import ssl
-from typing import Any, Dict, Optional, Union
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union
 
 import asyncpg
 
@@ -65,8 +66,8 @@ async def init_pool() -> asyncpg.Pool:
         dsn = _normalize_dsn(DATABASE_URL)
         _pool = await asyncpg.create_pool(
             dsn=dsn,
-            min_size=1,
-            max_size=10,
+            min_size=max(1, int(os.getenv("DB_POOL_MIN", "2"))),
+            max_size=int(os.getenv("DB_POOL_MAX", "10")),
             command_timeout=30,
             ssl=ssl_ctx,
         )
@@ -84,8 +85,8 @@ async def init_pool() -> asyncpg.Pool:
         database=DB_NAME,
         user=DB_USER,
         password=DB_PASSWORD,
-        min_size=1,
-        max_size=10,
+        min_size=max(1, int(os.getenv("DB_POOL_MIN", "2"))),
+        max_size=int(os.getenv("DB_POOL_MAX", "10")),
         command_timeout=30,
         ssl=ssl_ctx,
     )
@@ -168,9 +169,16 @@ async def init_tables(pool: asyncpg.Pool) -> None:
             CREATE TABLE IF NOT EXISTS "API keys" (
                 key TEXT PRIMARY KEY,
                 expires_at TEXT NOT NULL,
-                label TEXT NOT NULL DEFAULT ''
+                label TEXT NOT NULL DEFAULT '',
+                bypass_ratelimit BOOLEAN NOT NULL DEFAULT FALSE
             )
         """)
+        try:
+            await conn.execute("""
+                ALTER TABLE "API keys" ADD COLUMN IF NOT EXISTS bypass_ratelimit BOOLEAN NOT NULL DEFAULT FALSE
+            """)
+        except Exception:
+            pass  # Column may already exist or PG < 9.6
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS "Admin credentials" (
                 username TEXT PRIMARY KEY,
@@ -234,6 +242,27 @@ async def init_tables(pool: asyncpg.Pool) -> None:
             )
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "URL list" (
+                url_domain TEXT PRIMARY KEY,
+                type TEXT NOT NULL CHECK (type IN ('safe', 'scam')),
+                reason TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "Admin audit log" (
+                id SERIAL PRIMARY KEY,
+                username TEXT NOT NULL,
+                action TEXT NOT NULL,
+                resource TEXT,
+                details JSONB,
+                ip TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
         # Force correct types even if table existed already
         try:
             await _ensure_jsonb_columns(conn)
@@ -284,6 +313,23 @@ async def seed_defaults(pool: asyncpg.Pool) -> None:
             )
             log.warning("Seeded default admin auth (admin/changeme) — change it!")
 
+        n = await conn.fetchval('SELECT COUNT(*) FROM "URL list"')
+        if n == 0:
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            default_safe = [
+                "modora.xyz",
+                "sassguard.app",
+                "antiscammer.app",
+                "google.com",
+                "bing.com",
+            ]
+            for domain in default_safe:
+                await conn.execute(
+                    'INSERT INTO "URL list" (url_domain, type, reason, created_at) VALUES ($1, $2, $3, $4)',
+                    domain, "safe", "", now,
+                )
+            log.info("Seeded default safe URLs: %s", default_safe)
+
 
 # ----------------------------
 # API keys
@@ -292,30 +338,46 @@ async def api_key_get(key: str) -> Optional[Dict[str, Any]]:
     pool = get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            'SELECT key, expires_at, label FROM "API keys" WHERE key = $1', key
+            'SELECT key, expires_at, label, COALESCE(bypass_ratelimit, FALSE) AS bypass_ratelimit FROM "API keys" WHERE key = $1', key
         )
     if row is None:
         return None
-    return {"expires_at": row["expires_at"], "label": row["label"] or ""}
+    return {
+        "expires_at": row["expires_at"],
+        "label": row["label"] or "",
+        "bypass_ratelimit": bool(row.get("bypass_ratelimit", False)),
+    }
 
 
 async def api_key_get_all() -> Dict[str, Dict[str, Any]]:
     pool = get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch('SELECT key, expires_at, label FROM "API keys"')
-    return {r["key"]: {"expires_at": r["expires_at"], "label": r["label"] or ""} for r in rows}
+        rows = await conn.fetch('SELECT key, expires_at, label, COALESCE(bypass_ratelimit, FALSE) AS bypass_ratelimit FROM "API keys"')
+    return {
+        r["key"]: {
+            "expires_at": r["expires_at"],
+            "label": r["label"] or "",
+            "bypass_ratelimit": bool(r.get("bypass_ratelimit", False)),
+        }
+        for r in rows
+    }
 
 
-async def api_key_set(key: str, expires_at: str, label: str) -> None:
+async def api_key_set(
+    key: str,
+    expires_at: str,
+    label: str,
+    bypass_ratelimit: bool = False,
+) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO "API keys" (key, expires_at, label)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (key) DO UPDATE SET expires_at = $2, label = $3
+            INSERT INTO "API keys" (key, expires_at, label, bypass_ratelimit)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (key) DO UPDATE SET expires_at = $2, label = $3, bypass_ratelimit = $4
             """,
-            key, expires_at, label,
+            key, expires_at, label, bypass_ratelimit,
         )
 
 
@@ -347,6 +409,21 @@ async def admin_auth_set(username: str, password: str) -> None:
             """,
             username, password,
         )
+
+
+async def admin_auth_get_all() -> List[Dict[str, Any]]:
+    """List all admin usernames (no passwords)."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT username FROM "Admin credentials"')
+    return [{"username": r["username"]} for r in rows]
+
+
+async def admin_auth_delete(username: str) -> None:
+    """Remove an admin user. Caller must ensure at least one admin remains."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('DELETE FROM "Admin credentials" WHERE username = $1', username)
 
 
 
@@ -439,6 +516,74 @@ async def scammer_delete(user_id: str) -> None:
         await conn.execute(
             'DELETE FROM "Global banlist" WHERE user_id = $1',
             user_id,
+        )
+
+
+# ----------------------------
+# URL list (safe / scam domains)
+# ----------------------------
+async def url_list_get_all() -> Dict[str, Dict[str, Any]]:
+    """Return {domain: {type, reason}} for all URLs."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('SELECT url_domain, type, reason FROM "URL list"')
+    return {
+        r["url_domain"]: {"type": r["type"], "reason": r["reason"] or ""}
+        for r in rows
+    }
+
+
+async def url_list_get(domain: str) -> Optional[Dict[str, Any]]:
+    """Get a single URL entry by domain."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            'SELECT url_domain, type, reason FROM "URL list" WHERE url_domain = $1',
+            domain.lower().strip(),
+        )
+    if row is None:
+        return None
+    return {"domain": row["url_domain"], "type": row["type"], "reason": row["reason"] or ""}
+
+
+async def url_list_upsert(domain: str, url_type: str, reason: str = "") -> None:
+    """Insert or update a URL. url_type must be 'safe' or 'scam'."""
+    if url_type not in ("safe", "scam"):
+        raise ValueError("type must be 'safe' or 'scam'")
+    domain = domain.lower().strip()
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO "URL list" (url_domain, type, reason, created_at)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (url_domain) DO UPDATE SET type = $2, reason = $3
+            """,
+            domain, url_type, reason or "", now,
+        )
+
+
+async def url_list_delete(domain: str) -> None:
+    """Delete a URL from the list."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            'DELETE FROM "URL list" WHERE url_domain = $1',
+            domain.lower().strip(),
+        )
+
+
+async def admin_audit_log(username: str, action: str, resource: Optional[str] = None, details: Optional[Dict[str, Any]] = None, ip: Optional[str] = None) -> None:
+    """Log an admin action to the audit table."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO "Admin audit log" (username, action, resource, details, ip)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            username, action, resource, _jsonb_val(details) if details else None, ip,
         )
 
 
@@ -548,6 +693,33 @@ async def ban_request_get(case_id: str) -> Optional[Dict[str, Any]]:
     return _row_to_case_record(row)
 
 
+async def ban_request_list(status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """List ban requests with optional status filter."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if status:
+            rows = await conn.fetch(
+                """
+                SELECT case_id, created_at, user_id, reason, notes, proof_original_name, proof_url,
+                       reporter_meta, status, review
+                FROM "Ban requests" WHERE LOWER(status) = LOWER($1)
+                ORDER BY created_at DESC LIMIT $2
+                """,
+                status, limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT case_id, created_at, user_id, reason, notes, proof_original_name, proof_url,
+                       reporter_meta, status, review
+                FROM "Ban requests"
+                ORDER BY created_at DESC LIMIT $1
+                """,
+                limit,
+            )
+    return [_row_to_case_record(r) for r in rows]
+
+
 async def ban_request_update_status(case_id: str, status: str, review: Dict[str, Any]) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -598,6 +770,33 @@ async def fp_report_get(case_id: str) -> Optional[Dict[str, Any]]:
     if row is None:
         return None
     return _row_to_case_record(row)
+
+
+async def fp_report_list(status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """List false positive reports with optional status filter."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if status:
+            rows = await conn.fetch(
+                """
+                SELECT case_id, created_at, user_id, reason, notes, proof_original_name, proof_url,
+                       reporter_meta, status, review
+                FROM "False positive reports" WHERE LOWER(status) = LOWER($1)
+                ORDER BY created_at DESC LIMIT $2
+                """,
+                status, limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT case_id, created_at, user_id, reason, notes, proof_original_name, proof_url,
+                       reporter_meta, status, review
+                FROM "False positive reports"
+                ORDER BY created_at DESC LIMIT $1
+                """,
+                limit,
+            )
+    return [_row_to_case_record(r) for r in rows]
 
 
 async def fp_report_update_status(case_id: str, status: str, review: Dict[str, Any]) -> None:

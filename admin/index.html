@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AntiScammer API – Admin Dashboard</title>
+  <link rel="stylesheet" href="/admin/static/styles.css">
+</head>
+<body>
+  <form id="loginSection" onsubmit="return false">
+    <h2>Admin login</h2>
+    <div class="form-row"><label for="loginUser">Username</label><input type="text" id="loginUser" autocomplete="username"></div>
+    <div class="form-row"><label for="loginPass">Password</label><input type="password" id="loginPass" autocomplete="current-password"></div>
+    <div class="form-row"><button type="button" class="primary" id="btnLogin">Log in</button></div>
+    <div id="loginMsg" class="msg"></div>
+  </form>
+  <div id="mainContent">
+    <p class="logout"><button type="button" id="btnLogout">Log out</button></p>
+    <h1>AntiScammer API – Admin Dashboard</h1>
+    <nav class="tabs" id="tabBar">
+      <button type="button" data-tab="overview">Overview</button>
+      <button type="button" data-tab="apikeys">API Keys</button>
+      <button type="button" data-tab="urls">URL List</button>
+      <button type="button" data-tab="scammers">Scammers</button>
+      <button type="button" data-tab="users">Admin Users</button>
+      <button type="button" data-tab="banrequests">Ban Requests</button>
+      <button type="button" data-tab="fpreports">False Positives</button>
+      <button type="button" data-tab="settings">Settings</button>
+    </nav>
+    <div id="tabOverview" class="tab-panel">
+      <div class="dashboard-cards" id="dashboardCards"></div>
+    </div>
+    <div id="tabApikeys" class="tab-panel">
+      <section>
+        <h2>Add key</h2>
+        <div class="form-row">
+          <label>Key</label>
+          <input type="text" id="newKey" placeholder="ATSM-XXXX-XXXX-XXXX" class="key-mono" size="28">
+          <button type="button" id="btnGen">Generate</button>
+        </div>
+        <div class="form-row">
+          <label>Label</label>
+          <input type="text" id="newLabel" placeholder="e.g. Modora">
+        </div>
+        <div class="form-row">
+          <label>Expires (UTC)</label>
+          <input type="datetime-local" id="newExpires" step="1">
+          <label><input type="checkbox" id="newKeyBypassRatelimit"> Bypass rate limit</label>
+          <button type="button" class="primary" id="btnAddKey">Add key</button>
+        </div>
+        <div id="addKeyMsg" class="msg"></div>
+      </section>
+      <section>
+        <h2>Keys</h2>
+        <div id="listKeyMsg" class="msg"></div>
+        <table>
+          <thead><tr><th>Key</th><th>Label</th><th>Expires</th><th>Bypass RL</th><th></th></tr></thead>
+          <tbody id="keysBody"></tbody>
+        </table>
+      </section>
+    </div>
+    <div id="tabUrls" class="tab-panel">
+      <section>
+        <h2>Add URL</h2>
+        <div class="form-row">
+          <label>Domain</label>
+          <input type="text" id="newUrlDomain" placeholder="example.com">
+        </div>
+        <div class="form-row">
+          <label>Type</label>
+          <select id="newUrlType"><option value="safe">Safe</option><option value="scam">Scam</option></select>
+        </div>
+        <div class="form-row">
+          <label>Reason</label>
+          <input type="text" id="newUrlReason" placeholder="Optional reason">
+          <button type="button" class="primary" id="btnAddUrl">Add</button>
+        </div>
+        <button type="button" id="btnReloadUrls">Reload cache</button>
+        <div id="urlMsg" class="msg"></div>
+      </section>
+      <section>
+        <h2>URL List</h2>
+        <table>
+          <thead><tr><th>Domain</th><th>Type</th><th>Reason</th><th></th></tr></thead>
+          <tbody id="urlsBody"></tbody>
+        </table>
+      </section>
+    </div>
+    <div id="tabScammers" class="tab-panel">
+      <section>
+        <h2>Add scammer</h2>
+        <div class="form-row">
+          <label>User ID</label>
+          <input type="text" id="newScammerId" placeholder="Discord user ID">
+        </div>
+        <div class="form-row">
+          <label>Reason</label>
+          <input type="text" id="newScammerReason" placeholder="Reason">
+          <button type="button" class="primary" id="btnAddScammer">Add</button>
+        </div>
+        <button type="button" id="btnReloadScammers">Reload</button>
+        <div id="scammerMsg" class="msg"></div>
+      </section>
+      <section>
+        <h2>Scammers</h2>
+        <table>
+          <thead><tr><th>User ID</th><th>Reason</th><th></th></tr></thead>
+          <tbody id="scammersBody"></tbody>
+        </table>
+      </section>
+    </div>
+    <div id="tabUsers" class="tab-panel">
+      <section>
+        <h2>Add admin user</h2>
+        <form id="addUserForm" autocomplete="off" onsubmit="return false;">
+          <div class="form-row">
+            <label>Username</label>
+            <input type="text" id="newUserUsername" autocomplete="username">
+          </div>
+          <div class="form-row">
+            <label>Password</label>
+            <input type="password" id="newUserPassword" autocomplete="new-password">
+            <button type="button" class="primary" id="btnAddUser">Add</button>
+          </div>
+        </form>
+        <div id="userMsg" class="msg"></div>
+      </section>
+      <section>
+        <h2>Admin users</h2>
+        <table>
+          <thead><tr><th>Username</th><th></th></tr></thead>
+          <tbody id="usersBody"></tbody>
+        </table>
+      </section>
+    </div>
+    <div id="tabBanrequests" class="tab-panel">
+      <section>
+        <select id="banRequestStatus"><option value="">All</option><option value="pending" selected>Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+        <button type="button" id="btnLoadBanRequests">Refresh</button>
+      </section>
+      <table>
+        <thead><tr><th>Case</th><th>User</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+        <tbody id="banRequestsBody"></tbody>
+      </table>
+    </div>
+    <div id="tabFpreports" class="tab-panel">
+      <section>
+        <select id="fpReportStatus"><option value="">All</option><option value="pending" selected>Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+        <button type="button" id="btnLoadFpReports">Refresh</button>
+      </section>
+      <table>
+        <thead><tr><th>Case</th><th>User</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+        <tbody id="fpReportsBody"></tbody>
+      </table>
+    </div>
+    <div id="tabSettings" class="tab-panel">
+      <section>
+        <h2>Master API key</h2>
+        <div class="form-row">
+          <label>Current</label>
+          <input type="text" id="masterKeyDisplay" class="key-mono" readonly>
+        </div>
+        <div class="form-row">
+          <label>Set key</label>
+          <input type="text" id="masterKeyInput" placeholder="Paste API key" class="key-mono" size="28">
+          <button type="button" class="primary" id="btnSetMaster">Save</button>
+          <button type="button" class="danger" id="btnClearMaster">Clear</button>
+        </div>
+        <div id="masterMsg" class="msg"></div>
+      </section>
+    </div>
+  </div>
+  <script src="/admin/static/dashboard.js"></script>
+</body>
+</html>
