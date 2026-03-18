@@ -265,16 +265,16 @@ Content-Type: application/json
 ```json
 {
   "domain": "example.com",
-  "type": "safe",
+  "url_type": "safe",
   "reason": ""
 }
 ```
 
-| Field   | Type   | Required | Description                     |
-|---------|--------|----------|---------------------------------|
-| domain  | string | yes      | Domain (e.g. example.com)      |
-| type    | string | yes      | `"safe"` or `"scam"`           |
-| reason  | string | no       | Optional reason (scam URLs)     |
+| Field    | Type   | Required | Description                     |
+|----------|--------|----------|---------------------------------|
+| domain   | string | yes      | Domain (e.g. example.com)      |
+| url_type | string | yes      | `"safe"` or `"scam"`           |
+| reason   | string | no       | Optional reason (scam URLs)     |
 
 **Response:**
 ```json

@@ -352,7 +352,7 @@
     const reason = document.getElementById('newUrlReason').value.trim();
     if (!domain) { showMsg('urlMsg', 'Enter domain.', false); return; }
     try {
-      await api('POST', '/admin/urls', { domain, type, reason });
+      await api('POST', '/admin/urls', { domain, url_type: type, reason });
       document.getElementById('newUrlDomain').value = '';
       document.getElementById('newUrlReason').value = '';
       loadUrls();

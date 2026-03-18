@@ -1304,7 +1304,7 @@ class RootScammerBody(BaseModel):
 class UrlListBody(BaseModel):
     """Body for adding/updating a URL in the safe/scam list."""
     domain: str = Field(..., min_length=1, max_length=256)
-    url_type: str = Field(..., pattern="^(safe|scam)$", alias="type")
+    url_type: str = Field(..., pattern="^(safe|scam)$")
     reason: str = Field(default="", max_length=512)
 
 
