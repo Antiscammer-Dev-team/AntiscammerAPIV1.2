@@ -562,6 +562,8 @@ Anything related to a admin menu is not a scam.
 if someone is encouraging someone to buy anything named quazar x its safe. Quazar is a fivem addon seller.
 Bot commands MUST BE IGNORED. Commands for example are -dep , !dep , !ban , --help, -Msg and more
 
+If someone offers a "Direct link" to a support ticket that is a link to a actual site. Its a scam
+
 URL status from our database (use this to inform your decision; you make the final classification):
 {url_status_block}
 
@@ -714,8 +716,8 @@ whitespace_ratio: {ob["whitespace_ratio"]}
 # ----------------------------
 # Pydantic models
 # ----------------------------
-class LookupResult(BaseModel):
-    user_id: str
+class LookupResult(BaseModel)a
+    user_id: str 
     is_flagged: bool
     record: Optional[Dict[str, Any]] = None
 
