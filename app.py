@@ -716,7 +716,7 @@ whitespace_ratio: {ob["whitespace_ratio"]}
 # ----------------------------
 # Pydantic models
 # ----------------------------
-class LookupResult(BaseModel)a
+class LookupResult(BaseModel):
     user_id: str 
     is_flagged: bool
     record: Optional[Dict[str, Any]] = None
