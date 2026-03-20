@@ -103,6 +103,63 @@ _ADMIN_RATE_LIMIT = 60  # requests per minute
 _ADMIN_LOGIN_MAX_FAILS = 5
 _ADMIN_LOGIN_LOCK_SEC = 900  # 15 min
 
+_SCAM_PROMPT_SETTING_KEY = "scam_detection_prompt_template"
+_DEFAULT_SCAM_PROMPT_TEMPLATE = """You are a classifier that detects Discord scam messages.
+Respond ONLY with a JSON object with:
+
+"decision": string, one of ["scam","not_scam","uncertain"]
+"confidence": string, one of ["high","medium","low"]
+"reason": string
+
+Rules:
+Do NOT wrap JSON in markdown.
+Output must be STRICT JSON.
+If you are not completely sure, set decision="uncertain".
+Anything with labled ! / . or any of that such following ban or kick or anything is not a scam
+qs-fishing is a fishing plugin. Not Phishing.
+Discount codes are not a scam
+remote connections via tools like anydesk and teamviewer are fine if there to help fix a bug
+
+If someone sends a "Having issues replace the file with the one i sent" And has some context of trying to assist. Then its not a scam
+Any messages such as "Send your question/issue here" that does NOT redirect to a channel and instead is a url or mailto link to a discord.gg or github link is likely a scam This does not mean those links are scam look for the message too and pot a ping
+If a message says "share your questions below" (or similar) and contains a link (discord.gg, github, mailto, etc.), treat as likely scam. This can cause false positives; if the link is clearly an official channel or trusted source, prefer uncertain over scam.
+
+If ANYTHING in the message says "SQL" or "DB" or any other database and does not have other indicators thats a hard 100% not scam
+
+User offering free food is not a scam
+Saying a user needs a token is not a scam. Asking for a discord token or key is a scam
+"Setting up groups" Is just someone configering a plugin or a tool. NOT A SCAM
+Someone stating they have existing tickets or coins is not a scam
+Support is a thing. If someone is trying to help a user and asking for lua files or remote connection. Thats not a scam. Thats support
+Anything related to a admin menu is not a scam.
+if someone is encouraging someone to buy anything named quazar x its safe. Quazar is a fivem addon seller.
+Bot commands MUST BE IGNORED. Commands for example are -dep , !dep , !ban , --help, -Msg and more
+
+If someone offers a "Direct link" to a support ticket that is a link to a actual site. Its a scam
+
+URL status from our database (use this to inform your decision; you make the final classification):
+{url_status_block}
+
+Inputs Provided:
+{context_block}
+
+Current Message (RAW):
+{raw_message}
+
+Current Message (CLEANED):
+{clean_message}
+
+Reconstructed if vertical text:
+{joined_message}
+
+Obfuscation stats:
+looks_vertical: {looks_vertical}
+line_count: {line_count}
+single_char_line_ratio: {single_char_line_ratio}
+whitespace_ratio: {whitespace_ratio}
+"""
+_scam_prompt_template: str = _DEFAULT_SCAM_PROMPT_TEMPLATE
+
 # ----------------------------
 # General helpers
 # ----------------------------
@@ -214,6 +271,55 @@ async def require_admin_auth(
     if ip in _admin_login_fails:
         del _admin_login_fails[ip]
     return credentials.username
+
+
+def _render_scam_prompt(
+    *,
+    url_status_block: str,
+    context_block: str,
+    raw_message: str,
+    clean_message: str,
+    joined_message: str,
+    looks_vertical: bool,
+    line_count: int,
+    single_char_line_ratio: float,
+    whitespace_ratio: float,
+) -> str:
+    tmpl = _scam_prompt_template or _DEFAULT_SCAM_PROMPT_TEMPLATE
+    try:
+        return tmpl.format(
+            url_status_block=url_status_block,
+            context_block=context_block,
+            raw_message=raw_message,
+            clean_message=clean_message,
+            joined_message=joined_message,
+            looks_vertical=looks_vertical,
+            line_count=line_count,
+            single_char_line_ratio=single_char_line_ratio,
+            whitespace_ratio=whitespace_ratio,
+        )
+    except Exception:
+        log.exception("Invalid scam prompt template; falling back to default")
+        return _DEFAULT_SCAM_PROMPT_TEMPLATE.format(
+            url_status_block=url_status_block,
+            context_block=context_block,
+            raw_message=raw_message,
+            clean_message=clean_message,
+            joined_message=joined_message,
+            looks_vertical=looks_vertical,
+            line_count=line_count,
+            single_char_line_ratio=single_char_line_ratio,
+            whitespace_ratio=whitespace_ratio,
+        )
+
+
+async def _load_scam_prompt_template() -> None:
+    global _scam_prompt_template
+    saved = await db.app_setting_get(_SCAM_PROMPT_SETTING_KEY)
+    if saved and saved.strip():
+        _scam_prompt_template = saved
+    else:
+        _scam_prompt_template = _DEFAULT_SCAM_PROMPT_TEMPLATE
 
 # ----------------------------
 # 2FA helpers
@@ -531,60 +637,17 @@ async def detect_scam(
             url_status_lines.append(f"- {d}: Not in our database. Evaluate from context.")
     url_status_block = "\n".join(url_status_lines) if url_status_lines else "No URLs detected in message."
 
-    prompt = f"""You are a classifier that detects Discord scam messages.
-Respond ONLY with a JSON object with:
-
-"decision": string, one of ["scam","not_scam","uncertain"]
-"confidence": string, one of ["high","medium","low"]
-"reason": string
-
-Rules:
-Do NOT wrap JSON in markdown.
-Output must be STRICT JSON.
-If you are not completely sure, set decision="uncertain".
-Anything with labled ! / . or any of that such following ban or kick or anything is not a scam
-qs-fishing is a fishing plugin. Not Phishing.
-Discount codes are not a scam
-remote connections via tools like anydesk and teamviewer are fine if there to help fix a bug
-
-If someone sends a "Having issues replace the file with the one i sent" And has some context of trying to assist. Then its not a scam
-Any messages such as "Send your question/issue here" that does NOT redirect to a channel and instead is a url or mailto link to a discord.gg or github link is likely a scam This does not mean those links are scam look for the message too and pot a ping
-If a message says "share your questions below" (or similar) and contains a link (discord.gg, github, mailto, etc.), treat as likely scam. This can cause false positives; if the link is clearly an official channel or trusted source, prefer uncertain over scam.
-
-If ANYTHING in the message says "SQL" or "DB" or any other database and does not have other indicators thats a hard 100% not scam
-
-User offering free food is not a scam
-Saying a user needs a token is not a scam. Asking for a discord token or key is a scam
-"Setting up groups" Is just someone configering a plugin or a tool. NOT A SCAM
-Someone stating they have existing tickets or coins is not a scam
-Support is a thing. If someone is trying to help a user and asking for lua files or remote connection. Thats not a scam. Thats support
-Anything related to a admin menu is not a scam.
-if someone is encouraging someone to buy anything named quazar x its safe. Quazar is a fivem addon seller.
-Bot commands MUST BE IGNORED. Commands for example are -dep , !dep , !ban , --help, -Msg and more
-
-If someone offers a "Direct link" to a support ticket that is a link to a actual site. Its a scam
-
-URL status from our database (use this to inform your decision; you make the final classification):
-{url_status_block}
-
-Inputs Provided:
-{context_block or "[no context]"}
-
-Current Message (RAW):
-{canon["raw"]}
-
-Current Message (CLEANED):
-{canon["clean"]}
-
-Reconstructed if vertical text:
-{canon["joined"] or "[not detected]"}
-
-Obfuscation stats:
-looks_vertical: {ob["looks_vertical"]}
-line_count: {ob["line_count"]}
-single_char_line_ratio: {ob["single_char_line_ratio"]}
-whitespace_ratio: {ob["whitespace_ratio"]}
-"""
+    prompt = _render_scam_prompt(
+        url_status_block=url_status_block,
+        context_block=context_block or "[no context]",
+        raw_message=canon["raw"],
+        clean_message=canon["clean"],
+        joined_message=canon["joined"] or "[not detected]",
+        looks_vertical=ob["looks_vertical"],
+        line_count=ob["line_count"],
+        single_char_line_ratio=ob["single_char_line_ratio"],
+        whitespace_ratio=ob["whitespace_ratio"],
+    )
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -760,6 +823,7 @@ async def lifespan(app: FastAPI):
     pool = await db.init_pool()
     await db.init_tables(pool)
     await db.seed_defaults(pool)
+    await _load_scam_prompt_template()
     await load_scammers_db()
     await load_urls_db()
     api_keys_count = len(await db.api_key_get_all())
@@ -1272,6 +1336,10 @@ class AdminMasterKeyBody(BaseModel):
     key: Optional[str] = None
 
 
+class AdminPromptBody(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=20000)
+
+
 @app.get("/admin/master-key")
 async def admin_get_master_key(_user: str = Depends(require_admin_auth)):
     """
@@ -1301,6 +1369,29 @@ async def admin_set_master_key(body: AdminMasterKeyBody, _user: str = Depends(re
     # Clear master key
     await db.master_key_set(None)
     return {"ok": True, "key": None}
+
+
+@app.get("/admin/prompt")
+async def admin_get_prompt(_user: str = Depends(require_admin_auth)):
+    return {"ok": True, "prompt": _scam_prompt_template}
+
+
+@app.post("/admin/prompt")
+async def admin_set_prompt(body: AdminPromptBody, request: Request, _user: str = Depends(require_admin_auth)):
+    global _scam_prompt_template
+    prompt = body.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt required")
+    _scam_prompt_template = prompt
+    await db.app_setting_set(_SCAM_PROMPT_SETTING_KEY, prompt)
+    await db.admin_audit_log(
+        _user,
+        "prompt_update",
+        "scam_detection_prompt_template",
+        {"length": len(prompt)},
+        _get_client_ip(request),
+    )
+    return {"ok": True, "updated": True, "length": len(prompt)}
 
 
 # ----------------------------

@@ -262,6 +262,12 @@ async def init_tables(pool: asyncpg.Pool) -> None:
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "App settings" (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
 
         # Force correct types even if table existed already
         try:
@@ -584,6 +590,33 @@ async def admin_audit_log(username: str, action: str, resource: Optional[str] = 
             VALUES ($1, $2, $3, $4, $5)
             """,
             username, action, resource, _jsonb_val(details) if details else None, ip,
+        )
+
+
+# ----------------------------
+# App settings (simple key/value)
+# ----------------------------
+async def app_setting_get(key: str) -> Optional[str]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            'SELECT value FROM "App settings" WHERE key = $1',
+            key,
+        )
+    return row["value"] if row else None
+
+
+async def app_setting_set(key: str, value: str) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO "App settings" (key, value)
+            VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """,
+            key,
+            value,
         )
 
 

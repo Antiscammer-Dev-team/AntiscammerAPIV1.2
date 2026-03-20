@@ -168,6 +168,18 @@
         </div>
         <div id="masterMsg" class="msg"></div>
       </section>
+      <section>
+        <h2>Live scam detection prompt</h2>
+        <p>Edits apply immediately to new `/detect` requests.</p>
+        <div class="form-row">
+          <textarea id="promptEditor" rows="16" style="width:100%; font-family: ui-monospace, monospace;"></textarea>
+        </div>
+        <div class="form-row">
+          <button type="button" id="btnReloadPrompt">Reload</button>
+          <button type="button" class="primary" id="btnSavePrompt">Save prompt</button>
+        </div>
+        <div id="promptMsg" class="msg"></div>
+      </section>
     </div>
   </div>
   <script src="/admin/static/dashboard.js"></script>

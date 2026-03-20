@@ -4,3 +4,4 @@
 docs.html
 sync_scammers_to_db.py
 requirements-sync.txt
+/__pycache__

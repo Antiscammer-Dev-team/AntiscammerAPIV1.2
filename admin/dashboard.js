@@ -66,7 +66,10 @@
     else if (name === 'users') loadUsers();
     else if (name === 'banrequests') loadBanRequests();
     else if (name === 'fpreports') loadFpReports();
-    else if (name === 'settings') loadMasterKey();
+    else if (name === 'settings') {
+      loadMasterKey();
+      loadPromptTemplate();
+    }
   }
 
   async function loadDashboard() {
@@ -291,6 +294,15 @@
     } catch (e) { showMsg('masterMsg', e.message, false); }
   }
 
+  async function loadPromptTemplate() {
+    try {
+      const d = await api('GET', '/admin/prompt');
+      const editor = document.getElementById('promptEditor');
+      if (editor) editor.value = d.prompt || '';
+      showMsg('promptMsg', '', true);
+    } catch (e) { showMsg('promptMsg', e.message, false); }
+  }
+
   document.getElementById('btnLogout').onclick = () => {
     sessionStorage.removeItem('adminAuth');
     showMain(false);
@@ -427,6 +439,19 @@
       loadMasterKey();
       showMsg('masterMsg', 'Cleared.', true);
     } catch (e) { showMsg('masterMsg', e.message, false); }
+  });
+
+  document.getElementById('btnReloadPrompt')?.addEventListener('click', async () => {
+    await loadPromptTemplate();
+  });
+
+  document.getElementById('btnSavePrompt')?.addEventListener('click', async () => {
+    const prompt = document.getElementById('promptEditor')?.value || '';
+    if (!prompt.trim()) { showMsg('promptMsg', 'Prompt cannot be empty.', false); return; }
+    try {
+      await api('POST', '/admin/prompt', { prompt });
+      showMsg('promptMsg', 'Prompt updated live.', true);
+    } catch (e) { showMsg('promptMsg', e.message, false); }
   });
 
   if (sessionStorage.getItem('adminAuth')) {
