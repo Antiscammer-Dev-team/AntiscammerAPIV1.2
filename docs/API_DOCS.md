@@ -1,47 +1,49 @@
-# AntiScammer API Documentation
+# AntiScammer API Documentation (Partner & Public)
 
-This document covers all endpoints except the Master API. For Master API (root/staff) endpoints, see [MASTER_API.md](MASTER_API.md).
+This document describes **public** endpoints and **API key** (`X-API-Key`) endpoints.
+
+It does **not** include:
+
+- **`/admin/*`** — browser dashboard and admin JSON APIs (HTTP Basic Auth).
+- **Master API** — routes that require the master API key, e.g. **`/root/*`** and **`POST /staff/signal/antiscam/global-ban`**. See [MASTER_API.md](MASTER_API.md).
 
 **Base URL:** Your API base (e.g. `https://api.example.com`)
 
-**Response headers:** All responses include `X-Request-ID` and `X-Response-Time-Ms`.
+**Response headers:** Successful and error responses typically include `X-Request-ID` and `X-Response-Time-Ms`.
 
 ---
 
 ## Authentication
 
-| Auth type      | Header / Method | Used by                         |
-|----------------|-----------------|----------------------------------|
-| API Key        | `X-API-Key`     | Partner APIs (lookup, detect, etc.) |
-| Basic Auth     | `Authorization: Basic <base64>` | Admin dashboard              |
-| None           | -               | /ready, /health                   |
+| Auth type | Header / method | Used by |
+|-----------|-----------------|--------|
+| None | — | `/ready`, `/health` |
+| API key | `X-API-Key: <key>` | All other documented routes below except public health |
+
+API keys are validated against expiry and stored metadata (see key management in admin docs).
 
 ---
 
-## Public Endpoints (No Auth)
+## Public endpoints (no API key)
 
-### Health check
+### `GET /ready`
 
-```
-GET /ready
-```
+Lightweight liveness probe.
 
 **Response:**
+
 ```json
-{
-  "ok": true
-}
+{ "ok": true }
 ```
 
 ---
 
-### Health (detailed)
+### `GET /health`
 
-```
-GET /health
-```
+Readiness-style check: DB-backed stats for load balancers or monitoring.
 
 **Response:**
+
 ```json
 {
   "ok": true,
@@ -54,26 +56,41 @@ GET /health
 }
 ```
 
+| Field | Description |
+|-------|-------------|
+| known_scammers_count | Rows in the in-memory banlist cache |
+| twofa_* | 2FA records aggregated across API keys |
+| utc | Current server time (UTC, ISO-8601 Z) |
+
 ---
 
-## API Key Endpoints
+### `GET /`
 
-All endpoints below require `X-API-Key: <your_api_key>`.
+Returns **404** with JSON `{"detail":"Not found"}`. Use a specific path from this document for API calls.
 
 ---
 
-### User lookup (single)
+## API key endpoints
 
-```
-GET /lookup/{user_id}?include_reason=true
+All routes in this section require:
+
+```http
+X-API-Key: <your_api_key>
 ```
 
-| Param          | Type    | Description                    |
-|----------------|---------|--------------------------------|
-| user_id        | path    | Discord user ID                |
-| include_reason | query   | If true, include ban reason    |
+---
+
+## User lookup
+
+### `GET /lookup/{user_id}`
+
+| Param | Type | Description |
+|-------|------|-------------|
+| user_id | path | Discord user ID (digits; non-digits are stripped server-side) |
+| include_reason | query | If `true`, include `reason` when user is flagged |
 
 **Response:**
+
 ```json
 {
   "user_id": "123456789",
@@ -82,82 +99,86 @@ GET /lookup/{user_id}?include_reason=true
 }
 ```
 
+`reason` is omitted when `is_flagged` is false or when `include_reason` is false.
+
+**Errors:** `400` if no numeric user id remains after normalization.
+
 ---
 
-### User lookup (batch)
+### `POST /lookup`
 
-```
-POST /lookup
-Content-Type: application/json
-```
+Batch lookup (same logic as single lookup).
 
-**Request body:**
+**Content-Type:** `application/json`
+
+**Body:**
+
 ```json
 {
-  "user_ids": ["123456789", "987654321"],
+  "user_ids": ["123456789", "987654321", "bad"],
   "include_reason": false
 }
 ```
 
-| Field         | Type    | Required | Description              |
-|---------------|---------|----------|--------------------------|
-| user_ids      | array   | yes      | 1–500 user IDs           |
-| include_reason| boolean | no       | Include ban reasons      |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| user_ids | array | yes | 1–500 entries |
+| include_reason | boolean | no | Include ban reasons when flagged |
 
 **Response:**
+
 ```json
 {
-  "count": 2,
+  "count": 3,
   "results": [
-    {
-      "user_id": "123456789",
-      "is_flagged": true,
-      "reason": "NSFW Discord Invite"
-    },
-    {
-      "user_id": "987654321",
-      "is_flagged": false
-    }
+    { "user_id": "123456789", "is_flagged": true, "reason": "..." },
+    { "user_id": "987654321", "is_flagged": false },
+    { "user_id": "bad", "is_flagged": false, "error": "invalid_user_id" }
   ]
 }
 ```
 
+Invalid entries receive `is_flagged: false` and an `error` field instead of a normalized id.
+
 ---
 
-### Scam detection
+## Scam detection
 
-```
-POST /detect
-Content-Type: application/json
-```
+### `POST /detect`
 
-**Request body:**
+Runs the configured Ollama model (see server env: `OLLAMA_*`) on the message. Falls back to heuristics when the model errors or returns invalid JSON.
+
+**Content-Type:** `application/json`
+
+**Body:**
+
 ```json
 {
-  "message": "Check out this free nitro! discord.gg/abc123",
+  "message": "Text to classify",
   "context_messages": [
     {
       "created_at": "2026-03-18T12:00:00Z",
       "author": "User1",
-      "content": "Hey what's this link?"
+      "content": "Prior line"
     }
   ]
 }
 ```
 
-| Field           | Type   | Required | Description                  |
-|-----------------|--------|----------|------------------------------|
-| message         | string | yes      | Message to classify          |
-| context_messages| array  | no       | Prior messages (for context) |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| message | string | yes | Main message |
+| context_messages | array | no | Optional prior messages |
 
-**Response:**
+**Response (typical):**
+
 ```json
 {
   "is_scam": true,
   "decision": "scam",
   "uncertain": false,
   "confidence": "high",
-  "reason": "Classic nitro scam with suspicious link.",
+  "reason": "Explanation from the model or heuristics.",
   "obfuscation": {
     "looks_vertical": false,
     "line_count": 1,
@@ -167,314 +188,377 @@ Content-Type: application/json
 }
 ```
 
-| Field      | Type    | Description                           |
-|------------|---------|---------------------------------------|
-| is_scam    | boolean | True if decision is scam              |
-| decision   | string  | `scam`, `not_scam`, or `uncertain`    |
-| uncertain  | boolean | True if model was uncertain           |
-| confidence | string  | `high`, `medium`, or `low`            |
-| reason     | string  | Model's explanation                   |
+| Field | Description |
+|-------|-------------|
+| decision | `scam`, `not_scam`, or `uncertain` |
+| confidence | `high`, `medium`, `low`, or `null` on some error paths |
+| uncertain | `true` when decision is `uncertain` |
 
 ---
 
-### URL check (fast, no model)
+## URL check
 
-```
-POST /url-check
-Content-Type: application/json
-```
+### `POST /url-check`
 
-Look up URLs against the safe/scam database. No Ollama call.
+Fast domain classification against the safe/scam URL database (no LLM).
 
-**Request body:**
+**Content-Type:** `application/json`
+
+**Body:**
+
 ```json
-{
-  "urls": [
-    "https://discord.gg/abc123",
-    "https://goo.su/xyz"
-  ]
-}
+{ "urls": ["https://example.com/path", "goo.su/x"] }
 ```
 
-| Field | Type  | Required | Description     |
-|-------|-------|----------|-----------------|
-| urls  | array | yes      | 1–100 URLs      |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| urls | array | yes | 1–100 URL strings |
 
 **Response:**
+
 ```json
 {
   "ok": true,
   "count": 2,
   "items": [
-    {
-      "url": "https://discord.gg/abc123",
-      "domain": "discord.gg",
-      "status": "unknown"
-    },
-    {
-      "url": "https://goo.su/xyz",
-      "domain": "goo.su",
-      "status": "scam",
-      "reason": "iplogger redirect"
-    }
+    { "url": "https://example.com/path", "domain": "example.com", "status": "safe" },
+    { "url": "goo.su/x", "domain": "goo.su", "status": "scam", "reason": "..." }
   ]
 }
 ```
 
-| status   | Description                        |
-|----------|------------------------------------|
-| safe     | Domain in whitelist                |
-| scam     | Domain in scam database            |
-| unknown  | Not in database                    |
+| status | Meaning |
+|--------|---------|
+| safe | Domain on the allow list |
+| scam | Domain on the block list (`reason` may be present) |
+| unknown | Not listed (first domain extracted from each string) |
 
 ---
 
-### Canonicalize message
+## Canonicalize
 
+### `POST /canonicalize`
+
+Preprocesses a message the same way as `/detect` (obfuscation stats, cleaned/joined text). Useful for debugging integrations.
+
+**Content-Type:** `application/json`
+
+**Body:**
+
+```json
+{ "message": "Raw message text" }
 ```
-POST /canonicalize
-Content-Type: application/json
-```
 
-Preprocess a message for scam analysis (used internally by /detect).
+**Response:** Includes `raw`, `clean`, `joined`, and `obfuscation` (same shape as in `/detect`).
 
-**Request body:**
+---
+
+## Ticket audit (giveaway verification)
+
+Used to register expected Discord winner IDs for a giveaway, then verify who opens a ticket. Claims are stored **per giveaway session** (`audit_id`). The same Discord user can win **different** giveaways (different `audit_id` from separate registers). Optional `giveaway_key` is your own label for auditing.
+
+**Environment (server):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TICKET_AUDIT_TTL_DAYS` | `14` | Session expiry (clamped 1–365) |
+| `TICKET_AUDIT_DELAY_SEC` | `1.0` | Delay before building the lookup response |
+| `TICKET_AUDIT_CLAIM_RETENTION_DAYS` | `30` | How long a resolved claim blocks re-use (clamped 1–365) |
+
+---
+
+### `POST /ticket-audit/register`
+
+**Content-Type:** `application/json`
+
+**Body:**
+
 ```json
 {
-  "message": "Raw message text"
+  "discord_ids": ["123456789012345678", "987654321098765432"],
+  "store": "Optional store name",
+  "server_id": "optional_discord_guild_snowflake",
+  "giveaway_key": "optional_stable_id_for_your_logs"
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| discord_ids | array | yes | 1–100 strings; blank/invalid entries are skipped |
+| store | string | no | Free-form label |
+| server_id | string | no | Discord guild ID; if set, verify must send the same `server_id` |
+| giveaway_key | string | no | Your giveaway identifier (echoed on verify); uniqueness is still by `audit_id` |
 
 **Response:**
+
 ```json
 {
-  "raw": "...",
-  "clean": "...",
-  "joined": "...",
-  "obfuscation": {
-    "looks_vertical": false,
-    "line_count": 1,
-    "single_char_line_ratio": 0,
-    "whitespace_ratio": 0.15
-  }
+  "audit_id": "hex_string",
+  "expires_at": "2026-04-04T12:00:00Z",
+  "server_id": "111",
+  "giveaway_key": "spring-drop-2026"
 }
 ```
 
+`server_id` and `giveaway_key` appear only when provided.
+
+**Errors:**
+
+- `400` — `No valid discord_ids: all entries were blank or invalid`
+
 ---
 
-## Ban Requests
+### `POST /ticket-audit/verify`
 
-### Submit ban request
+**Content-Type:** `application/json`
 
+**Body:**
+
+```json
+{
+  "audit_id": "from_register",
+  "discord_id": "123456789012345678",
+  "include_reason": true,
+  "server_id": "optional_guild_if_session_had_server_id"
+}
 ```
-POST /banrequest
-Content-Type: multipart/form-data
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| audit_id | string | yes | Session id from register |
+| discord_id | string | yes | Cannot be blank; must normalize to digits |
+| include_reason | boolean | no | Passed through to banlist lookup |
+| server_id | string | conditionally | **Required** and must match if the session was created with `server_id` |
+
+After a short delay (`TICKET_AUDIT_DELAY_SEC`), the response includes banlist lookup for that Discord user (same fields as `GET /lookup`).
+
+**First successful claim (winner matches list, not yet claimed):**
+
+```json
+{
+  "audit_id": "...",
+  "id_match": true,
+  "user_id": "123456789012345678",
+  "lookup": { "user_id": "123456789012345678", "is_flagged": false },
+  "giveaway_key": "spring-drop-2026",
+  "claimed": true,
+  "resolved_at": "2026-03-18T12:00:01Z",
+  "retain_until": "2026-04-17T12:00:01Z"
+}
 ```
 
-| Field  | Type | Required | Description          |
-|--------|------|----------|----------------------|
-| user_id| text | yes      | Discord user ID      |
-| reason | text | yes      | Ban reason           |
-| notes  | text | no       | Additional notes     |
-| proof  | file | yes      | Proof file (max 10MB)|
+**Mismatch (id not in registered list):**
 
-**Allowed file types:** .png, .jpg, .jpeg, .webp, .gif, .txt, .log, .json, .pdf, .zip
+```json
+{
+  "audit_id": "...",
+  "id_match": false,
+  "message": "Ids do not match. Checking user.",
+  "user_id": "...",
+  "lookup": { "user_id": "...", "is_flagged": false }
+}
+```
+
+**Already claimed (same user + same `audit_id` within retention):**
+
+```json
+{
+  "audit_id": "...",
+  "id_match": true,
+  "already_claimed": true,
+  "message": "This ID has already been claimed",
+  "user_id": "...",
+  "lookup": { "...": "..." },
+  "resolved_at": "...",
+  "retain_until": "...",
+  "giveaway_key": "..."
+}
+```
+
+**Errors:**
+
+- `400` — `discord_id cannot be blank`, `discord_id must contain a valid numeric Discord user ID`, or `server_id is required and must match this audit session`
+- `404` — `Audit session not found or expired` (wrong key, unknown id, or past session expiry)
+
+---
+
+## Ban requests
+
+### `POST /banrequest`
+
+**Content-Type:** `multipart/form-data`
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| user_id | yes | Discord user id |
+| reason | yes | Ban reason |
+| notes | no | Extra notes |
+| proof | yes | File, max 10 MB |
+
+Allowed proof extensions: `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`, `.txt`, `.log`, `.json`, `.pdf`, `.zip`
 
 **Response:**
+
 ```json
-{
-  "ok": true,
-  "case_id": "ABC123DEF456"
-}
+{ "ok": true, "case_id": "ABC123DEF456" }
 ```
 
 ---
 
-### Get ban request
+### `GET /banrequest/{case_id}`
 
-```
-GET /banrequest/{case_id}
-```
+Returns the case record (JSON), including `status`, `user_id`, `reason`, `proof_url`, etc.
 
-**Response:** Full case record (case_id, user_id, reason, notes, status, proof_url, etc.)
+**Errors:** `404` if unknown case id.
 
 ---
 
-### Resolve ban request
+### `POST /banrequest/{case_id}/resolve`
 
-```
-POST /banrequest/{case_id}/resolve
-Content-Type: application/json
-```
+**Content-Type:** `application/json`
 
-**Request body:**
+**Body:**
+
 ```json
 {
   "action": "approve",
-  "decision_note": "Approved after review"
+  "decision_note": "Optional reviewer note"
 }
 ```
 
-| Field         | Type   | Required | Description                    |
-|---------------|--------|----------|--------------------------------|
-| action        | string | yes      | `approve` or `reject`          |
-| decision_note | string | no       | Reviewer note                  |
+| Field | Required | Description |
+|-------|----------|-------------|
+| action | yes | `approve` or `reject` |
+| decision_note | no | Stored in review metadata |
+
+On **approve**, the subject user is added to the global banlist (and mirrored to MariaDB when configured).
 
 **Response:**
+
 ```json
-{
-  "ok": true,
-  "case_id": "ABC123DEF456",
-  "status": "approved"
-}
+{ "ok": true, "case_id": "ABC123DEF456", "status": "approved" }
+```
+
+`status` is `approved` or `rejected`.
+
+---
+
+## False positive reports
+
+### `POST /falsepositivereport`
+
+Same shape as `POST /banrequest` (`user_id`, `reason`, `notes`, `proof` file).
+
+**Response:**
+
+```json
+{ "ok": true, "case_id": "XYZ789ABC012" }
 ```
 
 ---
 
-## False Positive Reports
+### `GET /falsepositivereport/{case_id}`
 
-### Submit false positive report
+Returns the FP report JSON.
 
-```
-POST /falsepositivereport
-Content-Type: multipart/form-data
-```
+---
 
-| Field  | Type | Required | Description          |
-|--------|------|----------|----------------------|
-| user_id| text | yes      | Discord user ID      |
-| reason | text | yes      | Report reason        |
-| notes  | text | no       | Additional notes     |
-| proof  | file | yes      | Proof file (max 10MB)|
+### `POST /falsepositivereport/{case_id}/resolve`
+
+Same body as ban request resolve (`action`, `decision_note`).
 
 **Response:**
+
 ```json
-{
-  "ok": true,
-  "case_id": "XYZ789ABC012"
-}
+{ "ok": true, "case_id": "XYZ789ABC012", "status": "approved" }
 ```
 
 ---
 
-### Get false positive report
+## Two-factor authentication (2FA)
 
-```
-GET /falsepositivereport/{case_id}
-```
+2FA secrets are scoped to **`(X-API-Key, user_id)`**. All 2FA routes require a valid API key header.
 
 ---
 
-### Resolve false positive report
+### `POST /2fa/setup`
 
-```
-POST /falsepositivereport/{case_id}/resolve
-Content-Type: application/json
-```
+**Content-Type:** `application/json`
 
-**Request body:**
+**Body:**
+
 ```json
-{
-  "action": "approve",
-  "decision_note": "User was incorrectly flagged"
-}
+{ "user_id": "123456789", "label": "optional_account_label" }
 ```
 
-**Response:**
-```json
-{
-  "ok": true,
-  "case_id": "XYZ789ABC012",
-  "status": "approved"
-}
-```
+**Response (setup or already enabled):**
 
----
-
-## 2FA Endpoints
-
-### Setup 2FA
-
-```
-POST /2fa/setup
-Content-Type: application/json
-```
-
-**Request body:**
-```json
-{
-  "user_id": "123456789",
-  "label": "optional_label"
-}
-```
-
-**Response:**
 ```json
 {
   "ok": true,
   "enabled": false,
   "user_id": "123456789",
   "issuer": "AntiScammer",
-  "account": "label",
+  "account": "PartnerLabel:123456789",
   "otpauth_url": "otpauth://totp/...",
-  "secret_base32": "JBSWY3DPEHPK3PXP"
+  "secret_base32": "..."
 }
 ```
 
+If 2FA is already enabled for that pair, `enabled` may be `true` and `detail` explains it.
+
 ---
 
-### Enable 2FA
+### `POST /2fa/enable`
 
-```
-POST /2fa/enable
-Content-Type: application/json
-```
+**Body:**
 
-**Request body:**
 ```json
-{
-  "user_id": "123456789",
-  "code": "123456"
-}
-```
-
----
-
-### Verify 2FA
-
-```
-POST /2fa/verify
-Content-Type: application/json
-```
-
-**Request body:**
-```json
-{
-  "user_id": "123456789",
-  "code": "123456"
-}
-```
-
----
-
-### Authenticate (alias for verify)
-
-```
-POST /authenticate
-Content-Type: application/json
-```
-
-Same body and response as `/2fa/verify`.
-
----
-
-### 2FA status
-
-```
-GET /2fa/status?user_id=123456789
+{ "user_id": "123456789", "code": "123456" }
 ```
 
 **Response:**
+
+```json
+{ "ok": true, "enabled": true, "user_id": "123456789" }
+```
+
+**Errors:** `400` if setup was not done; `401` if code invalid.
+
+---
+
+### `POST /2fa/verify`
+
+**Body:**
+
+```json
+{ "user_id": "123456789", "code": "123456" }
+```
+
+**Response:**
+
+```json
+{ "ok": true, "valid": true, "user_id": "123456789" }
+```
+
+**Errors:** `403` if 2FA not enabled for that key/user; `401` invalid code.
+
+---
+
+### `POST /authenticate`
+
+Same request/response behavior as `POST /2fa/verify`.
+
+---
+
+### `GET /2fa/status`
+
+| Param | Type | Required |
+|-------|------|----------|
+| user_id | query | yes |
+
+**Response:**
+
 ```json
 {
   "ok": true,
@@ -487,141 +571,29 @@ GET /2fa/status?user_id=123456789
 
 ---
 
-## Admin Endpoints (Basic Auth)
+## Error responses
 
-All admin endpoints require HTTP Basic Authentication (username/password configured in the database). Access via `/admin` in a browser or with `Authorization: Basic <base64(username:password)>`.
+JSON error bodies typically look like:
 
-**Rate limit:** 60 requests/minute per IP on admin API routes.
-
-**Login throttling:** 5 failed attempts lock for 15 minutes.
-
----
-
-### Admin Dashboard (HTML)
-
-```
-GET /admin
-GET /admin/
-```
-
-Returns the admin dashboard HTML (tabbed UI for keys, URLs, scammers, users, ban requests, etc.).
-
----
-
-### Dashboard stats
-
-```
-GET /admin/dashboard
-```
-
-**Response:**
 ```json
 {
-  "ok": true,
-  "known_scammers_count": 150,
-  "safe_urls_count": 5,
-  "scam_urls_count": 2,
-  "api_keys_count": 10,
-  "admin_users_count": 2,
-  "pending_ban_requests": 3,
-  "pending_fp_reports": 1,
-  "requests_total": 12345,
-  "avg_response_ms": 150,
-  "uptime_seconds": 86400,
-  "pid": 1234
+  "detail": "Human-readable message",
+  "request_id": "hex..."
 }
 ```
 
----
-
-### API Keys (admin)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /admin/keys | List keys |
-| GET | /admin/generate-key | Generate new key |
-| POST | /admin/keys | Add key |
-| PATCH | /admin/keys | Update key |
-| DELETE | /admin/keys | Delete key (body: `{"key": "..."}`) |
+| Status | Typical cause |
+|--------|----------------|
+| 400 | Validation, missing form fields, invalid action |
+| 401 | Missing/invalid API key, invalid 2FA code |
+| 403 | 2FA not enabled, or other forbidden states |
+| 404 | Unknown `case_id`, unknown ticket audit session |
+| 413 | Upload too large (e.g. ban report proof > 10 MB) |
+| 429 | Too many requests (e.g. admin routes; partner routes may add limits separately) |
+| 500 | Unexpected server failure |
 
 ---
 
-### URL List (admin)
+## Related documentation
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /admin/urls | List URLs |
-| POST | /admin/urls | Add URL |
-| DELETE | /admin/urls/{domain} | Delete URL |
-| POST | /admin/reload-urls | Reload URL cache |
-
----
-
-### Scammers (admin)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /admin/scammers | List scammers |
-| POST | /admin/scammers | Add scammer |
-| DELETE | /admin/scammers/{user_id} | Delete scammer |
-| POST | /admin/reload-scammers | Reload scammer cache |
-
----
-
-### Admin users
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /admin/users | List admins |
-| POST | /admin/users | Add admin |
-| DELETE | /admin/users/{username} | Delete admin |
-| PATCH | /admin/users/{username}/password | Change password |
-
----
-
-### Ban requests (admin)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /admin/ban-requests?status=pending&limit=100 | List ban requests |
-| POST | /admin/ban-requests/{case_id}/resolve | Resolve (approve/reject) |
-
----
-
-### False positive reports (admin)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /admin/fp-reports?status=pending&limit=100 | List FP reports |
-| POST | /admin/fp-reports/{case_id}/resolve | Resolve (approve/reject) |
-
----
-
-### Master key (admin)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /admin/master-key | Get masked master key |
-| POST | /admin/master-key | Set/clear master key |
-
----
-
-## Error Responses
-
-All errors return:
-```json
-{
-  "detail": "Error message",
-  "request_id": "abc123..."
-}
-```
-
-| Status | Description |
-|--------|-------------|
-| 400 | Bad request (validation) |
-| 401 | Missing/invalid API key or admin credentials |
-| 403 | Forbidden (e.g. login locked, wrong key type) |
-| 404 | Resource not found |
-| 413 | File too large |
-| 429 | Rate limited |
-| 500 | Internal server error |
+- [MASTER_API.md](MASTER_API.md) — `/root/*` and other master-key routes (not covered here).

@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import Any, Dict, List, Optional, Set
@@ -60,6 +60,13 @@ log = logging.getLogger("app")
 # ----------------------------
 DISCORD_WEBHOOK_URL = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
 DISCORD_FALSE_POSITIVE_WEBHOOK_URL = (os.getenv("DISCORD_FALSE_POSITIVE_WEBHOOK_URL") or "").strip()
+
+# Ticket audit (giveaway verification): session TTL and verify delay before lookup
+TICKET_AUDIT_TTL_DAYS = max(1, min(365, int(os.getenv("TICKET_AUDIT_TTL_DAYS", "14"))))
+TICKET_AUDIT_DELAY_SEC = float(os.getenv("TICKET_AUDIT_DELAY_SEC", "1.0"))
+TICKET_AUDIT_CLAIM_RETENTION_DAYS = max(
+    1, min(365, int(os.getenv("TICKET_AUDIT_CLAIM_RETENTION_DAYS", "30")))
+)
 
 # Ollama API (e.g. https://ollama.com/api for cloud, or http://localhost:11434 for local). We call /generate → .../api/generate or .../generate.
 # For ollama.com cloud: OLLAMA_API_KEY is required (Bearer token); otherwise Ollama returns 401.
@@ -174,8 +181,23 @@ def _parse_utc_iso_z(ts: str) -> datetime:
 def _utc_now_z() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
+
+def _datetime_to_iso_z(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 def _normalize_user_id(user_id: str) -> str:
     return re.sub(r"\D+", "", user_id or "")
+
+
+def _lookup_user_dict(uid: str, *, include_reason: bool) -> Dict[str, Any]:
+    reason = _KNOWN_SCAMMERS.get(uid)
+    out: Dict[str, Any] = {"user_id": uid, "is_flagged": reason is not None}
+    if include_reason and reason is not None:
+        out["reason"] = reason
+    return out
+
 
 def _safe_ext(filename: str) -> str:
     if not filename:
@@ -812,6 +834,36 @@ class TwoFASetupRequest(BaseModel):
 class TwoFACodeRequest(BaseModel):
     user_id: str = Field(..., min_length=1, max_length=128)
     code: str = Field(..., min_length=6, max_length=10)
+
+
+class TicketAuditRegisterRequest(BaseModel):
+    discord_ids: List[str] = Field(..., min_length=1, max_length=100)
+    store: Optional[str] = Field(default=None, max_length=256)
+    server_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Discord guild snowflake; scope this giveaway to one server (call register per server).",
+    )
+    giveaway_key: Optional[str] = Field(
+        default=None,
+        max_length=256,
+        description="Your stable giveaway id/name; same user can win different giveaways (different register/audit_id per giveaway).",
+    )
+
+
+class TicketAuditVerifyRequest(BaseModel):
+    audit_id: str = Field(..., min_length=1, max_length=128)
+    discord_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Discord user snowflake; cannot be blank.",
+    )
+    include_reason: bool = False
+    server_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Required when the session was registered with server_id; must match.",
+    )
 
 # ----------------------------
 # FastAPI app + middleware
@@ -1906,6 +1958,175 @@ async def ban_request(
 
     return {"ok": True, "case_id": case_id}
 
+@app.post("/ticket-audit/register")
+async def ticket_audit_register(
+    body: TicketAuditRegisterRequest,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    _meta: dict = Depends(require_api_key),
+):
+    await db.ticket_audit_claim_purge_expired()
+
+    seen: Set[str] = set()
+    normalized: List[str] = []
+    for raw in body.discord_ids:
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if not s:
+            continue
+        uid = _normalize_user_id(s)
+        if uid and uid not in seen:
+            seen.add(uid)
+            normalized.append(uid)
+    if not normalized:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid discord_ids: all entries were blank or invalid",
+        )
+
+    audit_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=TICKET_AUDIT_TTL_DAYS)
+    store_label = (body.store or "").strip() or None
+    server_id = _normalize_user_id(body.server_id or "")
+    server_id_val: Optional[str] = server_id if server_id else None
+    giveaway_key = (body.giveaway_key or "").strip() or None
+
+    await db.ticket_audit_insert(
+        audit_id,
+        x_api_key,
+        store_label,
+        server_id_val,
+        giveaway_key,
+        normalized,
+        now,
+        expires_at,
+    )
+
+    out_reg: Dict[str, Any] = {
+        "audit_id": audit_id,
+        "expires_at": _datetime_to_iso_z(expires_at),
+    }
+    if server_id_val is not None:
+        out_reg["server_id"] = server_id_val
+    if giveaway_key is not None:
+        out_reg["giveaway_key"] = giveaway_key
+    return out_reg
+
+
+@app.post("/ticket-audit/verify")
+async def ticket_audit_verify(
+    body: TicketAuditVerifyRequest,
+    x_api_key: str = Header(..., alias="X-API-Key"),
+    _meta: dict = Depends(require_api_key),
+):
+    await db.ticket_audit_claim_purge_expired()
+
+    aid = body.audit_id.strip()
+    session = await db.ticket_audit_get(aid, x_api_key)
+    if not session:
+        raise HTTPException(status_code=404, detail="Audit session not found or expired")
+
+    sess_server = session.get("server_id")
+    if sess_server:
+        verify_sid = _normalize_user_id(body.server_id or "")
+        if not verify_sid or verify_sid != sess_server:
+            raise HTTPException(
+                status_code=400,
+                detail="server_id is required and must match this audit session",
+            )
+
+    raw_discord = body.discord_id
+    if raw_discord is None or not str(raw_discord).strip():
+        raise HTTPException(status_code=400, detail="discord_id cannot be blank")
+
+    uid = _normalize_user_id(str(raw_discord))
+    if not uid:
+        raise HTTPException(
+            status_code=400,
+            detail="discord_id must contain a valid numeric Discord user ID",
+        )
+
+    delay = max(0.0, TICKET_AUDIT_DELAY_SEC)
+    await asyncio.sleep(delay)
+
+    lookup = _lookup_user_dict(uid, include_reason=body.include_reason)
+    allowed = set(session["discord_ids"])
+    id_match = uid in allowed
+
+    claim = await db.ticket_audit_claim_get_active(aid, x_api_key, uid)
+    if claim:
+        ra = claim["resolved_at"]
+        rt = claim["retain_until"]
+        ra_out = _datetime_to_iso_z(ra) if isinstance(ra, datetime) else None
+        rt_out = _datetime_to_iso_z(rt) if isinstance(rt, datetime) else None
+        ac: Dict[str, Any] = {
+            "audit_id": aid,
+            "id_match": id_match,
+            "already_claimed": True,
+            "message": "This ID has already been claimed",
+            "user_id": uid,
+            "lookup": lookup,
+            "resolved_at": ra_out,
+            "retain_until": rt_out,
+        }
+        if session.get("giveaway_key") is not None:
+            ac["giveaway_key"] = session["giveaway_key"]
+        return ac
+
+    out: Dict[str, Any] = {
+        "audit_id": aid,
+        "id_match": id_match,
+        "user_id": uid,
+        "lookup": lookup,
+    }
+    if session.get("giveaway_key") is not None:
+        out["giveaway_key"] = session["giveaway_key"]
+
+    if not id_match:
+        out["message"] = "Ids do not match. Checking user."
+        return out
+
+    now = datetime.now(timezone.utc)
+    retain_until = now + timedelta(days=TICKET_AUDIT_CLAIM_RETENTION_DAYS)
+    inserted = await db.ticket_audit_claim_try_insert(
+        aid, x_api_key, uid, now, retain_until
+    )
+    if not inserted:
+        claim2 = await db.ticket_audit_claim_get_active(aid, x_api_key, uid)
+        if claim2:
+            ra = claim2["resolved_at"]
+            rt = claim2["retain_until"]
+            ra_out = _datetime_to_iso_z(ra) if isinstance(ra, datetime) else None
+            rt_out = _datetime_to_iso_z(rt) if isinstance(rt, datetime) else None
+            race: Dict[str, Any] = {
+                "audit_id": aid,
+                "id_match": True,
+                "already_claimed": True,
+                "message": "This ID has already been claimed",
+                "user_id": uid,
+                "lookup": lookup,
+                "resolved_at": ra_out,
+                "retain_until": rt_out,
+            }
+            if session.get("giveaway_key") is not None:
+                race["giveaway_key"] = session["giveaway_key"]
+            return race
+        return {
+            "audit_id": aid,
+            "id_match": True,
+            "already_claimed": True,
+            "message": "This ID has already been claimed",
+            "user_id": uid,
+            "lookup": lookup,
+        }
+
+    out["claimed"] = True
+    out["resolved_at"] = _datetime_to_iso_z(now)
+    out["retain_until"] = _datetime_to_iso_z(retain_until)
+    return out
+
+
 @app.get("/lookup/{user_id}")
 async def lookup_user(
     user_id: str,
@@ -1916,11 +2137,7 @@ async def lookup_user(
     if not uid:
         raise HTTPException(status_code=400, detail="Invalid user_id")
 
-    reason = _KNOWN_SCAMMERS.get(uid)
-    out: Dict[str, Any] = {"user_id": uid, "is_flagged": reason is not None}
-    if include_reason and reason is not None:
-        out["reason"] = reason
-    return out
+    return _lookup_user_dict(uid, include_reason=include_reason)
 
 @app.post("/lookup")
 async def lookup_batch(req: BatchLookupRequest, _meta: dict = Depends(require_api_key)):
@@ -1930,11 +2147,7 @@ async def lookup_batch(req: BatchLookupRequest, _meta: dict = Depends(require_ap
         if not uid:
             results.append({"user_id": str(raw), "is_flagged": False, "error": "invalid_user_id"})
             continue
-        reason = _KNOWN_SCAMMERS.get(uid)
-        out = {"user_id": uid, "is_flagged": reason is not None}
-        if req.include_reason and reason is not None:
-            out["reason"] = reason
-        results.append(out)
+        results.append(_lookup_user_dict(uid, include_reason=req.include_reason))
     return {"count": len(results), "results": results}
 
 @app.post("/canonicalize")

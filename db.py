@@ -269,6 +269,66 @@ async def init_tables(pool: asyncpg.Pool) -> None:
             )
         """)
 
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "Ticket audit sessions" (
+                audit_id TEXT PRIMARY KEY,
+                api_key TEXT NOT NULL,
+                store_label TEXT,
+                server_id TEXT,
+                giveaway_key TEXT,
+                discord_ids JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL
+            )
+        """)
+        try:
+            await conn.execute(
+                'ALTER TABLE "Ticket audit sessions" ADD COLUMN IF NOT EXISTS server_id TEXT'
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                'ALTER TABLE "Ticket audit sessions" ADD COLUMN IF NOT EXISTS giveaway_key TEXT'
+            )
+        except Exception:
+            pass
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ticket_audit_sessions_api_key
+            ON "Ticket audit sessions" (api_key)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ticket_audit_sessions_api_server
+            ON "Ticket audit sessions" (api_key, server_id)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ticket_audit_sessions_giveaway
+            ON "Ticket audit sessions" (api_key, giveaway_key)
+            """
+        )
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "Ticket audit claims" (
+                audit_id TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                resolved_at TIMESTAMPTZ NOT NULL,
+                retain_until TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (audit_id, api_key, user_id)
+            )
+        """)
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_ticket_audit_claims_retain
+            ON "Ticket audit claims" (retain_until)
+            """
+        )
+
         # Force correct types even if table existed already
         try:
             await _ensure_jsonb_columns(conn)
@@ -523,6 +583,155 @@ async def scammer_delete(user_id: str) -> None:
             'DELETE FROM "Global banlist" WHERE user_id = $1',
             user_id,
         )
+
+
+# ----------------------------
+# Ticket audit (giveaway winner verification)
+# ----------------------------
+async def ticket_audit_insert(
+    audit_id: str,
+    api_key: str,
+    store_label: Optional[str],
+    server_id: Optional[str],
+    giveaway_key: Optional[str],
+    discord_ids: List[str],
+    created_at: datetime,
+    expires_at: datetime,
+) -> None:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO "Ticket audit sessions"
+                (audit_id, api_key, store_label, server_id, giveaway_key, discord_ids, created_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            audit_id,
+            api_key,
+            store_label,
+            server_id,
+            giveaway_key,
+            discord_ids,
+            created_at,
+            expires_at,
+        )
+
+
+async def ticket_audit_claim_purge_expired() -> None:
+    """Remove resolved claims past retain_until."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            'DELETE FROM "Ticket audit claims" WHERE retain_until < NOW()'
+        )
+
+
+async def ticket_audit_claim_get_active(
+    audit_id: str, api_key: str, user_id: str
+) -> Optional[Dict[str, Any]]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT resolved_at, retain_until FROM "Ticket audit claims"
+            WHERE audit_id = $1 AND api_key = $2 AND user_id = $3
+              AND retain_until >= NOW()
+            """,
+            audit_id,
+            api_key,
+            user_id,
+        )
+    if row is None:
+        return None
+    return {
+        "resolved_at": row["resolved_at"],
+        "retain_until": row["retain_until"],
+    }
+
+
+async def ticket_audit_claim_try_insert(
+    audit_id: str,
+    api_key: str,
+    user_id: str,
+    resolved_at: datetime,
+    retain_until: datetime,
+) -> bool:
+    """
+    Insert a resolved claim. Returns True if a new row was inserted.
+    Returns False if this user was already claimed for this giveaway (conflict or race).
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO "Ticket audit claims"
+                (audit_id, api_key, user_id, resolved_at, retain_until)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (audit_id, api_key, user_id) DO NOTHING
+            RETURNING audit_id
+            """,
+            audit_id,
+            api_key,
+            user_id,
+            resolved_at,
+            retain_until,
+        )
+    return row is not None
+
+
+async def ticket_audit_get(audit_id: str, api_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Return session for this audit_id and api_key, or None if missing, wrong key, or expired.
+    discord_ids is returned as a list of str.
+    """
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT audit_id, store_label, server_id, giveaway_key, discord_ids, created_at, expires_at
+            FROM "Ticket audit sessions"
+            WHERE audit_id = $1 AND api_key = $2
+            """,
+            audit_id,
+            api_key,
+        )
+    if row is None:
+        return None
+    exp = row["expires_at"]
+    if isinstance(exp, datetime):
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        else:
+            exp = exp.astimezone(timezone.utc)
+    else:
+        return None
+    now = datetime.now(timezone.utc)
+    if now >= exp:
+        return None
+    raw_ids = row["discord_ids"]
+    if isinstance(raw_ids, str):
+        try:
+            raw_ids = json.loads(raw_ids)
+        except Exception:
+            raw_ids = []
+    if not isinstance(raw_ids, list):
+        raw_ids = []
+    ids_list = [str(x) for x in raw_ids]
+    sid = row.get("server_id")
+    if sid is not None:
+        sid = str(sid).strip() or None
+    gk = row.get("giveaway_key")
+    if gk is not None:
+        gk = str(gk).strip() or None
+    return {
+        "audit_id": row["audit_id"],
+        "store_label": row["store_label"],
+        "server_id": sid,
+        "giveaway_key": gk,
+        "discord_ids": ids_list,
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+    }
 
 
 # ----------------------------
