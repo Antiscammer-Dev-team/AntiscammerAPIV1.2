@@ -1,17 +1,19 @@
 """
 PostgreSQL database layer for AntiScammer API.
 Uses asyncpg. Configure via env: DB_USERNAME, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME (or DATABASE_URL).
-SSL: DB_SSLMODE = disable | require | require-no-verify (default: require).
-  require-no-verify = use SSL but do not verify server cert (for self-signed/internal).
+SSL: DB_SSLMODE = disable | allow | prefer | require | require-no-verify | verify-ca | verify-full
+  (default: prefer — try TLS first, fall back to plain TCP if the server has no SSL; good for Docker Postgres).
+  If unset, sslmode= on DATABASE_URL is used when present.
+  Note: asyncpg treats ssl=True as verify-full; this module never passes ssl=True, only named modes.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import ssl
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import parse_qs, urlparse
 
 import asyncpg
 
@@ -25,10 +27,17 @@ DB_NAME = os.getenv("DB_NAME", "antiscammer")
 DB_USER = os.getenv("DB_USERNAME") or os.getenv("DB_USER", "")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
-# SSL: disable | require | require-no-verify (SSL without cert verification)
-DB_SSLMODE = (os.getenv("DB_SSLMODE") or "require").strip().lower()
-
 _pool: Optional[asyncpg.Pool] = None
+
+_VALID_SSLMODES = frozenset(
+    {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+)
+_SSLMODE_ALIASES = {
+    "require-no-verify": "require",
+    "require_no_verify": "require",
+    "no-verify": "require",
+    "noverify": "require",
+}
 
 
 def get_pool() -> asyncpg.Pool:
@@ -37,22 +46,53 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
-def _ssl_for_asyncpg() -> Union[bool, ssl.SSLContext]:
-    """Return ssl argument for asyncpg: False, True, or context that skips verification."""
-    if DB_SSLMODE == "disable":
-        return False
-    if DB_SSLMODE == "require-no-verify":
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    return True
-
-
 def _normalize_dsn(url: str) -> str:
     if url.startswith("postgres://"):
         return "postgresql://" + url[11:]
     return url
+
+
+def _sslmode_from_dsn_query(dsn: str) -> Optional[str]:
+    try:
+        q = urlparse(dsn).query
+        if not q:
+            return None
+        modes = parse_qs(q, keep_blank_values=True).get("sslmode")
+        if not modes or not modes[0].strip():
+            return None
+        return modes[0].strip().lower()
+    except Exception:
+        return None
+
+
+def _resolve_effective_sslmode(dsn_for_parse: Optional[str]) -> str:
+    """
+    DB_SSLMODE env overrides DATABASE_URL ?sslmode= when set (non-empty).
+    Otherwise default is 'prefer' (matches asyncpg for TCP; works with plain Postgres in Docker).
+    """
+    raw = os.getenv("DB_SSLMODE")
+    if raw is not None and raw.strip() != "":
+        mode = raw.strip().lower().replace("_", "-")
+    elif dsn_for_parse:
+        mode = _sslmode_from_dsn_query(dsn_for_parse)
+        if mode is None:
+            mode = "prefer"
+    else:
+        mode = "prefer"
+    mode = _SSLMODE_ALIASES.get(mode, mode)
+    if mode not in _VALID_SSLMODES:
+        raise ValueError(
+            f"Invalid DB_SSLMODE / sslmode={mode!r}; expected one of "
+            f"{sorted(_VALID_SSLMODES)} or alias require-no-verify"
+        )
+    return mode
+
+
+def _ssl_for_asyncpg(mode: str) -> Union[bool, str]:
+    """Return ssl connect_kw for asyncpg (never True — that maps to verify-full inside asyncpg)."""
+    if mode == "disable":
+        return False
+    return mode
 
 
 async def init_pool() -> asyncpg.Pool:
@@ -60,18 +100,18 @@ async def init_pool() -> asyncpg.Pool:
     if _pool is not None:
         return _pool
 
-    ssl_ctx = _ssl_for_asyncpg()
-
     if DATABASE_URL:
         dsn = _normalize_dsn(DATABASE_URL)
+        ssl_mode = _resolve_effective_sslmode(dsn)
+        ssl_arg = _ssl_for_asyncpg(ssl_mode)
         _pool = await asyncpg.create_pool(
             dsn=dsn,
             min_size=max(1, int(os.getenv("DB_POOL_MIN", "2"))),
             max_size=int(os.getenv("DB_POOL_MAX", "10")),
             command_timeout=30,
-            ssl=ssl_ctx,
+            ssl=ssl_arg,
         )
-        log.info("Database pool created from DATABASE_URL")
+        log.info("Database pool created from DATABASE_URL sslmode=%s", ssl_mode)
         return _pool
 
     if not DB_USER or not DB_PASSWORD:
@@ -79,6 +119,8 @@ async def init_pool() -> asyncpg.Pool:
             "Set DATABASE_URL or both DB_USERNAME and DB_PASSWORD in env"
         )
 
+    ssl_mode = _resolve_effective_sslmode(None)
+    ssl_arg = _ssl_for_asyncpg(ssl_mode)
     _pool = await asyncpg.create_pool(
         host=DB_HOST,
         port=DB_PORT,
@@ -88,15 +130,15 @@ async def init_pool() -> asyncpg.Pool:
         min_size=max(1, int(os.getenv("DB_POOL_MIN", "2"))),
         max_size=int(os.getenv("DB_POOL_MAX", "10")),
         command_timeout=30,
-        ssl=ssl_ctx,
+        ssl=ssl_arg,
     )
     log.info(
-        "Database pool created %s@%s:%s/%s ssl=%s",
+        "Database pool created %s@%s:%s/%s sslmode=%s",
         DB_USER,
         DB_HOST,
         DB_PORT,
         DB_NAME,
-        DB_SSLMODE,
+        ssl_mode,
     )
     return _pool
 

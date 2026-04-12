@@ -1,7 +1,7 @@
 # AntiScammer API - Coolify compatible
 FROM python:3.11-slim
 
-# CA certificates so SSL to PostgreSQL (e.g. Let's Encrypt) can be verified with DB_SSLMODE=require
+# CA certificates for TLS to PostgreSQL; use DB_SSLMODE=verify-full (or verify-ca) when you need CA verification
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
