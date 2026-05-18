@@ -66,17 +66,349 @@
     else if (name === 'users') loadUsers();
     else if (name === 'banrequests') loadBanRequests();
     else if (name === 'fpreports') loadFpReports();
+    else if (name === 'logs') {
+      startLogsTab();
+    }
     else if (name === 'settings') {
       loadMasterKey();
       loadPromptTemplate();
     }
+    stopLogsAutoRefresh();
+    if (name === 'logs') startLogsAutoRefreshIfEnabled();
   }
+
+  const logsState = {
+    apiKey: '',
+    quickFilter: '',
+    offset: 0,
+    limit: 100,
+    items: [],
+    total: 0,
+    newestAt: null,
+    detail: null,
+    stats: null,
+    storage: null,
+    autoTimer: null,
+  };
+
+  function logsQueryParams(extra) {
+    const p = new URLSearchParams();
+    const add = (k, v) => { if (v != null && v !== '') p.set(k, v); };
+    if (logsState.apiKey) add('api_key', logsState.apiKey);
+    const ep = document.getElementById('logsFilterEndpoint')?.value;
+    const status = document.getElementById('logsFilterStatus')?.value.trim();
+    const method = document.getElementById('logsFilterMethod')?.value;
+    const auth = document.getElementById('logsFilterAuth')?.value;
+    const since = document.getElementById('logsFilterSince')?.value;
+    const until = document.getElementById('logsFilterUntil')?.value;
+    const q = document.getElementById('logsFilterQ')?.value.trim();
+    add('endpoint_name', ep);
+    add('status', status);
+    add('method', method);
+    add('auth_kind', auth);
+    add('q', q);
+    if (since) add('since', new Date(since).toISOString().replace(/\.\d{3}Z$/, 'Z'));
+    if (until) add('until', new Date(until).toISOString().replace(/\.\d{3}Z$/, 'Z'));
+    const qf = logsState.quickFilter;
+    if (qf === 'errors') add('errors_only', 'true');
+    else if (qf === 'slow') add('slow_only', 'true');
+    else if (qf === '429') { add('status', '429'); add('rate_limited', 'true'); }
+    else if (qf === 'invalid_key') add('auth_kind', 'invalid_key');
+    else if (qf === 'expired_key') add('auth_kind', 'expired_key');
+    add('limit', String(logsState.limit));
+    add('offset', String(logsState.offset));
+    if (extra) Object.entries(extra).forEach(([k, v]) => add(k, v));
+    const qs = p.toString();
+    return qs ? '?' + qs : '';
+  }
+
+  function statusClass(code) {
+    const n = Number(code) || 0;
+    if (n >= 500) return 'status-5xx';
+    if (n >= 400) return 'status-4xx';
+    if (n >= 300) return 'status-3xx';
+    if (n >= 200) return 'status-2xx';
+    return '';
+  }
+
+  function formatLogTime(iso) {
+    if (!iso) return '';
+    try { return new Date(iso).toLocaleString(); } catch (_) { return iso; }
+  }
+
+  function renderBarChart(elId, hourly, field) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    const rows = hourly || [];
+    if (!rows.length) { el.innerHTML = '<span style="color:#666;font-size:0.85em">No data</span>'; return; }
+    const max = Math.max(1, ...rows.map(h => h[field] || 0));
+    el.innerHTML = rows.map(h => {
+      const v = h[field] || 0;
+      const pct = Math.max(4, Math.round((v / max) * 100));
+      const errCls = field === 'error_count' && v > 0 ? ' err' : '';
+      const tip = (h.hour || '') + ': ' + v;
+      return '<div class="bar' + errCls + '" style="height:' + pct + '%" data-tip="' + esc(tip) + '"></div>';
+    }).join('');
+  }
+
+  function renderLogsSummary() {
+    const st = logsState.stats;
+    const storage = logsState.storage;
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+    set('logsStatTotal', storage?.row_count != null ? storage.row_count : (logsState.total ?? '—'));
+    set('logsStatErrors24', st?.errors_24h != null ? st.errors_24h : '—');
+    set('logsStatSlow24', st?.slow_24h != null ? st.slow_24h : '—');
+    set('logsStatAvgMs', st?.avg_ms != null ? Math.round(st.avg_ms) : '—');
+    set('logsStatP95', st?.p95_ms != null ? Math.round(st.p95_ms) : '—');
+    set('logsStatStorage', storage?.size_mb != null ? storage.size_mb + ' MB' : '—');
+  }
+
+  function renderLogsSubtabs() {
+    const wrap = document.getElementById('logsSubtabs');
+    if (!wrap) return;
+    const keys = [{ api_key: '', label: 'All' }].concat(logsState.stats?.by_key || []);
+    wrap.innerHTML = keys.map(k => {
+      const active = (k.api_key || '') === (logsState.apiKey || '') ? ' active' : '';
+      const lbl = esc(k.label || k.api_key || 'All');
+      return '<button type="button" class="logs-key-tab' + active + '" data-key="' + esc(k.api_key || '') + '">' + lbl + '</button>';
+    }).join('');
+    wrap.querySelectorAll('.logs-key-tab').forEach(btn => {
+      btn.onclick = () => {
+        logsState.apiKey = btn.dataset.key || '';
+        logsState.offset = 0;
+        renderLogsSubtabs();
+        loadRequestLogs(false);
+      };
+    });
+  }
+
+  function populateEndpointFilter() {
+    const sel = document.getElementById('logsFilterEndpoint');
+    if (!sel) return;
+    const cur = sel.value;
+    const eps = logsState.stats?.by_endpoint || [];
+    sel.innerHTML = '<option value="">All</option>' + eps.map(e => {
+      const name = e.endpoint_name || e.name || '';
+      return '<option value="' + esc(name) + '">' + esc(name) + ' (' + esc(e.count) + ')</option>';
+    }).join('');
+    if (cur) sel.value = cur;
+  }
+
+  function renderLogsTable() {
+    const body = document.getElementById('logsBody');
+    if (!body) return;
+    body.innerHTML = logsState.items.map(row => {
+      const sc = statusClass(row.status_code);
+      const slowCls = row.is_slow ? ' row-slow' : '';
+      const rl = row.rate_limited ? 'Y' : '';
+      return '<tr class="' + slowCls + '"><td>' + esc(formatLogTime(row.created_at)) + '</td><td>' + esc(row.method)
+        + '</td><td class="path-cell" title="' + esc(row.path) + '">' + esc(row.path) + '</td><td>' + esc(row.endpoint_name)
+        + '</td><td class="' + sc + '">' + esc(row.status_code) + '</td><td>' + esc(row.time_ms)
+        + '</td><td class="key-full" title="' + esc(row.api_key) + '">' + esc(row.api_key || '')
+        + '</td><td>' + esc(row.auth_kind) + '</td><td>' + esc(rl)
+        + '</td><td><button type="button" data-action="logDetail" data-id="' + esc(row.id) + '">Detail</button></td></tr>';
+    }).join('') || '<tr><td colspan="10">No logs match filters.</td></tr>';
+    body.querySelectorAll('[data-action="logDetail"]').forEach(btn => {
+      btn.onclick = () => openLogDetail(btn.dataset.id);
+    });
+    const pager = document.getElementById('logsPager');
+    if (pager) {
+      const start = logsState.total ? logsState.offset + 1 : 0;
+      const end = Math.min(logsState.offset + logsState.items.length, logsState.total);
+      pager.innerHTML = 'Showing ' + start + '–' + end + ' of ' + logsState.total
+        + ' <button type="button" id="logsPrev"' + (logsState.offset <= 0 ? ' disabled' : '') + '>Prev</button>'
+        + ' <button type="button" id="logsNext"' + (logsState.offset + logsState.limit >= logsState.total ? ' disabled' : '') + '>Next</button>';
+      document.getElementById('logsPrev')?.addEventListener('click', () => {
+        logsState.offset = Math.max(0, logsState.offset - logsState.limit);
+        loadRequestLogs(false);
+      });
+      document.getElementById('logsNext')?.addEventListener('click', () => {
+        if (logsState.offset + logsState.limit < logsState.total) {
+          logsState.offset += logsState.limit;
+          loadRequestLogs(false);
+        }
+      });
+    }
+  }
+
+  async function loadLogsMeta() {
+    try {
+      const [stats, storage] = await Promise.all([
+        api('GET', '/admin/request-logs/stats'),
+        api('GET', '/admin/request-logs/storage'),
+      ]);
+      logsState.stats = stats;
+      logsState.storage = storage;
+      renderLogsSummary();
+      renderBarChart('logsChartRequests', stats?.hourly, 'count');
+      renderBarChart('logsChartErrors', stats?.hourly, 'error_count');
+      renderLogsSubtabs();
+      populateEndpointFilter();
+    } catch (e) {
+      showMsg('logsMsg', e.message, false);
+    }
+  }
+
+  async function loadRequestLogs(incremental) {
+    try {
+      const extra = {};
+      if (incremental && logsState.newestAt) extra.since = logsState.newestAt;
+      const d = await api('GET', '/admin/request-logs' + logsQueryParams(extra));
+      const items = d.items || [];
+      if (incremental && logsState.newestAt && items.length) {
+        const ids = new Set(logsState.items.map(r => r.id));
+        const fresh = items.filter(r => !ids.has(r.id));
+        logsState.items = fresh.concat(logsState.items).slice(0, logsState.limit);
+        logsState.total = d.total != null ? d.total : logsState.total;
+        showMsg('logsMsg', fresh.length ? '+' + fresh.length + ' new' : '', true);
+      } else {
+        logsState.items = items;
+        logsState.total = d.total != null ? d.total : 0;
+        showMsg('logsMsg', '', true);
+      }
+      if (logsState.items.length) {
+        logsState.newestAt = logsState.items.reduce((a, b) => {
+          if (!a) return b.created_at;
+          return new Date(b.created_at) > new Date(a) ? b.created_at : a;
+        }, null);
+      }
+      renderLogsTable();
+    } catch (e) {
+      showMsg('logsMsg', e.message, false);
+    }
+  }
+
+  function applyLogsPreset(preset) {
+    logsState.quickFilter = '';
+    logsState.apiKey = '';
+    logsState.offset = 0;
+    const sinceEl = document.getElementById('logsFilterSince');
+    const untilEl = document.getElementById('logsFilterUntil');
+    const statusEl = document.getElementById('logsFilterStatus');
+    const authEl = document.getElementById('logsFilterAuth');
+    const qEl = document.getElementById('logsFilterQ');
+    if (sinceEl) sinceEl.value = '';
+    if (untilEl) untilEl.value = '';
+    if (statusEl) statusEl.value = '';
+    if (authEl) authEl.value = '';
+    if (qEl) qEl.value = '';
+    document.querySelectorAll('.logs-qf').forEach(b => b.classList.remove('active'));
+    if (preset === 'errors') {
+      logsState.quickFilter = 'errors';
+      document.querySelector('.logs-qf[data-qf="errors"]')?.classList.add('active');
+    } else if (preset === 'slow') {
+      logsState.quickFilter = 'slow';
+      document.querySelector('.logs-qf[data-qf="slow"]')?.classList.add('active');
+    } else {
+      document.querySelector('.logs-qf[data-qf=""]')?.classList.add('active');
+    }
+  }
+
+  function startLogsTab(preset) {
+    if (preset) applyLogsPreset(preset);
+    logsState.newestAt = null;
+    loadLogsMeta();
+    loadRequestLogs(false);
+  }
+
+  function stopLogsAutoRefresh() {
+    if (logsState.autoTimer) {
+      clearInterval(logsState.autoTimer);
+      logsState.autoTimer = null;
+    }
+  }
+
+  function startLogsAutoRefreshIfEnabled() {
+    stopLogsAutoRefresh();
+    if (!document.getElementById('logsAutoRefresh')?.checked) return;
+    logsState.autoTimer = setInterval(() => {
+      if (document.getElementById('tabLogs')?.classList.contains('active')) {
+        loadLogsMeta();
+        loadRequestLogs(true);
+      }
+    }, 5000);
+  }
+
+  async function exportRequestLogs() {
+    try {
+      const path = '/admin/request-logs/export' + logsQueryParams({ limit: '5000', offset: '0' });
+      const r = await fetch(base + path, { headers: getAuthHeader() });
+      if (!r.ok) throw new Error(await r.text() || String(r.status));
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'request-logs-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showMsg('logsMsg', 'Export started.', true);
+    } catch (e) { showMsg('logsMsg', e.message, false); }
+  }
+
+  function buildCurl(detail) {
+    const host = window.location.origin + (base || '');
+    const pathPart = detail.path || '/';
+    const url = host + pathPart + (detail.query_string ? '?' + detail.query_string : '');
+    const lines = ['curl -X ' + (detail.method || 'GET') + " '" + url + "'"];
+    const hdrs = detail.request_headers || {};
+    Object.entries(hdrs).forEach(([k, v]) => {
+      if (k.toLowerCase() === 'host') return;
+      lines.push("  -H '" + String(k).replace(/'/g, "'\\''") + ': ' + String(v).replace(/'/g, "'\\''") + "'");
+    });
+    if (detail.api_key) {
+      lines.push("  -H 'X-API-Key: " + String(detail.api_key).replace(/'/g, "'\\''") + "'");
+    }
+    if (detail.request_body) {
+      const body = typeof detail.request_body === 'string' ? detail.request_body : JSON.stringify(detail.request_body);
+      lines.push("  -d '" + body.replace(/'/g, "'\\''") + "'");
+    }
+    return lines.join(' \\\n');
+  }
+
+  async function openLogDetail(id) {
+    try {
+      const d = await api('GET', '/admin/request-logs/' + encodeURIComponent(id));
+      logsState.detail = d;
+      const body = document.getElementById('logDetailBody');
+      if (body) body.textContent = JSON.stringify(d, null, 2);
+      const modal = document.getElementById('logDetailModal');
+      if (modal) modal.hidden = false;
+    } catch (e) { showMsg('logsMsg', e.message, false); }
+  }
+
+  function closeLogModal() {
+    const modal = document.getElementById('logDetailModal');
+    if (modal) modal.hidden = true;
+    logsState.detail = null;
+  }
+
+  async function copyText(text, okMsg) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showMsg('logsMsg', okMsg || 'Copied.', true);
+    } catch (_) {
+      showMsg('logsMsg', 'Copy failed.', false);
+    }
+  }
+
+  window.switchToLogs = function(preset) {
+    switchTab('logs');
+    if (preset) {
+      applyLogsPreset(preset);
+      logsState.offset = 0;
+      logsState.newestAt = null;
+      loadRequestLogs(false);
+    }
+  };
 
   async function loadDashboard() {
     try {
-      const d = await api('GET', '/admin/dashboard');
+      const [d, stats, storage] = await Promise.all([
+        api('GET', '/admin/dashboard'),
+        api('GET', '/admin/request-logs/stats').catch(() => null),
+        api('GET', '/admin/request-logs/storage').catch(() => null),
+      ]);
       const cards = document.getElementById('dashboardCards');
-      cards.innerHTML = [
+      const baseCards = [
         ['Scammers', d.known_scammers_count],
         ['Safe URLs', d.safe_urls_count],
         ['Scam URLs', d.scam_urls_count],
@@ -87,12 +419,28 @@
         ['Requests', d.requests_total],
         ['Avg ms', d.avg_response_ms],
         ['Uptime (s)', d.uptime_seconds],
-      ].map(([l, v]) => `<div class="card"><div class="label">${esc(l)}</div><div class="value">${esc(v)}</div></div>`).join('');
+      ];
+      const logCards = [];
+      if (stats) {
+        logCards.push(['Errors 24h', stats.errors_24h, 'errors']);
+        logCards.push(['Slow 24h', stats.slow_24h, 'slow']);
+      }
+      if (storage) {
+        const mb = storage.size_mb != null ? storage.size_mb + ' MB' : storage.row_count;
+        logCards.push(['Log storage', mb, 'storage']);
+      }
+      cards.innerHTML = baseCards.map(([l, v]) =>
+        '<div class="card"><div class="label">' + esc(l) + '</div><div class="value">' + esc(v) + '</div></div>'
+      ).concat(logCards.map(([l, v, preset]) =>
+        '<div class="card clickable" data-logs-preset="' + esc(preset) + '"><div class="label">' + esc(l) + '</div><div class="value">' + esc(v) + '</div></div>'
+      )).join('');
+      cards.querySelectorAll('[data-logs-preset]').forEach(card => {
+        card.onclick = () => window.switchToLogs(card.dataset.logsPreset);
+      });
     } catch (e) {
       document.getElementById('dashboardCards').innerHTML = '<div class="msg err">' + esc(e.message) + '</div>';
     }
   }
-
   async function loadKeys() {
     try {
       const d = await api('GET', '/admin/keys');
@@ -452,6 +800,60 @@
       await api('POST', '/admin/prompt', { prompt });
       showMsg('promptMsg', 'Prompt updated live.', true);
     } catch (e) { showMsg('promptMsg', e.message, false); }
+  });
+
+  document.querySelectorAll('.logs-qf').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.logs-qf').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      logsState.quickFilter = btn.dataset.qf || '';
+      logsState.offset = 0;
+      logsState.newestAt = null;
+      const statusEl = document.getElementById('logsFilterStatus');
+      const authEl = document.getElementById('logsFilterAuth');
+      if (statusEl) statusEl.value = '';
+      if (authEl) authEl.value = '';
+      if (logsState.quickFilter === 'invalid_key' && authEl) authEl.value = 'invalid_key';
+      if (logsState.quickFilter === 'expired_key' && authEl) authEl.value = 'expired_key';
+      if (logsState.quickFilter === '429' && statusEl) statusEl.value = '429';
+      loadRequestLogs(false);
+    });
+  });
+  document.querySelector('.logs-qf[data-qf=""]')?.classList.add('active');
+
+  document.getElementById('btnLogsApply')?.addEventListener('click', () => {
+    logsState.offset = 0;
+    logsState.newestAt = null;
+    loadRequestLogs(false);
+  });
+  document.getElementById('btnLogsRefresh')?.addEventListener('click', () => {
+    logsState.newestAt = null;
+    loadLogsMeta();
+    loadRequestLogs(false);
+  });
+  document.getElementById('logsAutoRefresh')?.addEventListener('change', startLogsAutoRefreshIfEnabled);
+  document.getElementById('btnLogsExport')?.addEventListener('click', exportRequestLogs);
+
+  document.querySelectorAll('[data-action="closeLogModal"]').forEach(el => {
+    el.addEventListener('click', closeLogModal);
+  });
+  document.getElementById('btnCopyRequestId')?.addEventListener('click', () => {
+    if (logsState.detail?.request_id) copyText(logsState.detail.request_id, 'request_id copied.');
+  });
+  document.getElementById('btnCopyApiKey')?.addEventListener('click', () => {
+    if (logsState.detail?.api_key) copyText(logsState.detail.api_key, 'API key copied.');
+  });
+  document.getElementById('btnCopyCurl')?.addEventListener('click', () => {
+    if (logsState.detail) copyText(buildCurl(logsState.detail), 'curl copied.');
+  });
+  document.getElementById('btnFilterByRequestId')?.addEventListener('click', () => {
+    if (!logsState.detail?.request_id) return;
+    closeLogModal();
+    const qEl = document.getElementById('logsFilterQ');
+    if (qEl) qEl.value = logsState.detail.request_id;
+    logsState.offset = 0;
+    logsState.newestAt = null;
+    loadRequestLogs(false);
   });
 
   if (sessionStorage.getItem('adminAuth')) {

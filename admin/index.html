@@ -25,6 +25,7 @@
       <button type="button" data-tab="users">Admin Users</button>
       <button type="button" data-tab="banrequests">Ban Requests</button>
       <button type="button" data-tab="fpreports">False Positives</button>
+      <button type="button" data-tab="logs">Request Logs</button>
       <button type="button" data-tab="settings">Settings</button>
     </nav>
     <div id="tabOverview" class="tab-panel">
@@ -152,6 +153,109 @@
         <thead><tr><th>Case</th><th>User</th><th>Reason</th><th>Status</th><th></th></tr></thead>
         <tbody id="fpReportsBody"></tbody>
       </table>
+    </div>
+    <div id="tabLogs" class="tab-panel logs-panel">
+      <div class="logs-summary" id="logsSummary">
+        <span class="logs-stat"><span class="lbl">Total</span><span class="val" id="logsStatTotal">—</span></span>
+        <span class="logs-stat"><span class="lbl">Errors 24h</span><span class="val err-val" id="logsStatErrors24">—</span></span>
+        <span class="logs-stat"><span class="lbl">Slow 24h</span><span class="val warn-val" id="logsStatSlow24">—</span></span>
+        <span class="logs-stat"><span class="lbl">Avg ms</span><span class="val" id="logsStatAvgMs">—</span></span>
+        <span class="logs-stat"><span class="lbl">P95 ms</span><span class="val" id="logsStatP95">—</span></span>
+        <span class="logs-stat"><span class="lbl">Storage</span><span class="val" id="logsStatStorage">—</span></span>
+      </div>
+      <div class="logs-charts">
+        <div class="logs-chart">
+          <div class="logs-chart-title">Requests / hour</div>
+          <div class="bar-chart" id="logsChartRequests"></div>
+        </div>
+        <div class="logs-chart">
+          <div class="logs-chart-title">Errors / hour</div>
+          <div class="bar-chart" id="logsChartErrors"></div>
+        </div>
+      </div>
+      <div class="logs-subtabs" id="logsSubtabs"></div>
+      <div class="logs-toolbar">
+        <div class="logs-quick-filters">
+          <button type="button" class="logs-qf" data-qf="">All</button>
+          <button type="button" class="logs-qf" data-qf="errors">Errors only</button>
+          <button type="button" class="logs-qf" data-qf="slow">Slow only</button>
+          <button type="button" class="logs-qf" data-qf="429">429</button>
+          <button type="button" class="logs-qf" data-qf="invalid_key">Invalid key</button>
+          <button type="button" class="logs-qf" data-qf="expired_key">Expired key</button>
+        </div>
+        <div class="logs-filters form-row">
+          <label>Endpoint</label>
+          <select id="logsFilterEndpoint"><option value="">All</option></select>
+          <label>Status</label>
+          <input type="text" id="logsFilterStatus" placeholder="e.g. 429" size="5">
+          <label>Method</label>
+          <select id="logsFilterMethod">
+            <option value="">All</option>
+            <option>GET</option>
+            <option>POST</option>
+            <option>PUT</option>
+            <option>PATCH</option>
+            <option>DELETE</option>
+          </select>
+          <label>Auth</label>
+          <select id="logsFilterAuth">
+            <option value="">All</option>
+            <option value="valid">valid</option>
+            <option value="invalid_key">invalid_key</option>
+            <option value="expired_key">expired_key</option>
+            <option value="missing">missing</option>
+            <option value="master">master</option>
+            <option value="none">none</option>
+          </select>
+          <label>Since</label>
+          <input type="datetime-local" id="logsFilterSince" step="1">
+          <label>Until</label>
+          <input type="datetime-local" id="logsFilterUntil" step="1">
+          <label>Search</label>
+          <input type="text" id="logsFilterQ" placeholder="path, key, request_id…" size="18">
+          <button type="button" id="btnLogsApply">Apply</button>
+          <button type="button" id="btnLogsRefresh">Refresh</button>
+          <label><input type="checkbox" id="logsAutoRefresh"> Auto 5s</label>
+          <button type="button" id="btnLogsExport">Export JSON</button>
+        </div>
+      </div>
+      <div id="logsMsg" class="msg"></div>
+      <div class="logs-table-wrap">
+        <table class="logs-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Method</th>
+              <th>Path</th>
+              <th>Endpoint</th>
+              <th>Status</th>
+              <th>ms</th>
+              <th>API key</th>
+              <th>Auth</th>
+              <th>RL</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="logsBody"></tbody>
+        </table>
+      </div>
+      <p class="logs-pager" id="logsPager"></p>
+    </div>
+    <div id="logDetailModal" class="modal" hidden>
+      <div class="modal-backdrop" data-action="closeLogModal"></div>
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h2>Request log detail</h2>
+          <button type="button" class="modal-close" data-action="closeLogModal">&times;</button>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="btnCopyRequestId">Copy request_id</button>
+          <button type="button" id="btnCopyApiKey">Copy API key</button>
+          <button type="button" id="btnCopyCurl">Copy curl</button>
+          <button type="button" id="btnFilterByRequestId">Filter by request_id</button>
+        </div>
+        <pre class="modal-body" id="logDetailBody"></pre>
+      </div>
     </div>
     <div id="tabSettings" class="tab-panel">
       <section>

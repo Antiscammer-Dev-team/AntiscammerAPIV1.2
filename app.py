@@ -10,12 +10,13 @@ import os
 import re
 import sys
 import time
+import traceback
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 import pyotp
@@ -44,6 +45,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
 # ----------------------------
 # Logging
@@ -74,6 +76,8 @@ OLLAMA_BASE_URL = (os.getenv("OLLAMA_BASE_URL") or "https://ollama.com/api").str
 OLLAMA_API_KEY = (os.getenv("OLLAMA_API_KEY") or "").strip()
 OLLAMA_MODEL = (os.getenv("OLLAMA_MODEL") or "gpt-oss:20b-cloud").strip()
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "20"))
+
+LOG_SLOW_MS = max(0, int(os.getenv("LOG_SLOW_MS", "2000")))
 
 # ----------------------------
 # Paths / Storage (file-based storage removed; DB used)
@@ -281,6 +285,7 @@ async def require_admin_auth(
             del _admin_login_fails[ip]
     p = await db.admin_auth_get(credentials.username)
     if not p or p != credentials.password:
+        request.state.admin_login_failed = True
         cnt, _ = _admin_login_fails.get(ip, (0, 0))
         cnt += 1
         lock_until = now + _ADMIN_LOGIN_LOCK_SEC if cnt >= _ADMIN_LOGIN_MAX_FAILS else 0
@@ -292,7 +297,19 @@ async def require_admin_auth(
         )
     if ip in _admin_login_fails:
         del _admin_login_fails[ip]
+    request.state.admin_user = credentials.username
     return credentials.username
+
+
+async def _admin_audit(
+    request: Request,
+    username: str,
+    action: str,
+    resource: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    request.state.admin_audit_action = action
+    await db.admin_audit_log(username, action, resource, details, _get_client_ip(request))
 
 
 def _render_scam_prompt(
@@ -901,6 +918,225 @@ if _admin_dir.exists():
 
 log.info("API booting...")
 
+# Ordered (method, path_regex, display_name) — first match wins
+ROUTE_DISPLAY_NAMES: List[Tuple[Optional[str], str, str]] = [
+    ("GET", r"^/$", "Root"),
+    ("GET", r"^/health$", "Health check"),
+    ("GET", r"^/ready$", "Ready probe"),
+    ("POST", r"^/detect$", "Scam detection"),
+    ("POST", r"^/canonicalize$", "Message canonicalize"),
+    ("POST", r"^/url-check$", "URL check"),
+    ("GET", r"^/lookup/[^/]+$", "User lookup"),
+    ("POST", r"^/lookup$", "Batch user lookup"),
+    ("POST", r"^/banrequest$", "Submit ban request"),
+    ("GET", r"^/banrequest/[^/]+$", "Get ban request"),
+    ("POST", r"^/banrequest/[^/]+/resolve$", "Resolve ban request"),
+    ("POST", r"^/falsepositivereport$", "Submit false positive report"),
+    ("GET", r"^/falsepositivereport/[^/]+$", "Get false positive report"),
+    ("POST", r"^/falsepositivereport/[^/]+/resolve$", "Resolve false positive report"),
+    ("POST", r"^/ticket-audit/register$", "Ticket audit: Register"),
+    ("POST", r"^/ticket-audit/verify$", "Ticket audit: Verify"),
+    ("POST", r"^/2fa/setup$", "2FA: Setup"),
+    ("POST", r"^/2fa/enable$", "2FA: Enable"),
+    ("POST", r"^/2fa/verify$", "2FA: Verify"),
+    ("GET", r"^/2fa/status$", "2FA: Status"),
+    ("POST", r"^/authenticate$", "2FA: Authenticate"),
+    ("GET", r"^/root/api-keys$", "Root: List API keys"),
+    ("POST", r"^/root/api-keys$", "Root: Create API key"),
+    ("PATCH", r"^/root/api-keys$", "Root: Update API key"),
+    ("DELETE", r"^/root/api-keys$", "Root: Delete API key"),
+    ("GET", r"^/root/scammers$", "Root: List scammers"),
+    ("POST", r"^/root/scammers$", "Root: Add scammer"),
+    ("DELETE", r"^/root/scammers$", "Root: Delete scammer (body)"),
+    ("DELETE", r"^/root/scammers/[^/]+$", "Root: Delete scammer"),
+    ("GET", r"^/root/urls$", "Root: List URLs"),
+    ("POST", r"^/root/urls$", "Root: Add URL"),
+    ("DELETE", r"^/root/urls/[^/]+$", "Root: Delete URL"),
+    ("POST", r"^/staff/signal/antiscam/global-ban$", "Staff: Global ban"),
+    ("GET", r"^/admin/?$", "Admin: Dashboard page"),
+    ("GET", r"^/admin/admin\.js$", "Admin: Legacy JS"),
+    (None, r"^/admin/static/", "Admin: Static asset"),
+    ("GET", r"^/admin/keys$", "Admin: List API keys"),
+    ("GET", r"^/admin/generate-key$", "Admin: Generate API key"),
+    ("POST", r"^/admin/keys$", "Admin: Add API key"),
+    ("PATCH", r"^/admin/keys$", "Admin: Update API key"),
+    ("DELETE", r"^/admin/keys$", "Admin: Delete API key"),
+    ("POST", r"^/admin/reload-scammers$", "Admin: Reload scammers"),
+    ("GET", r"^/admin/urls$", "Admin: List URLs"),
+    ("POST", r"^/admin/urls$", "Admin: Add URL"),
+    ("DELETE", r"^/admin/urls/[^/]+$", "Admin: Delete URL"),
+    ("POST", r"^/admin/reload-urls$", "Admin: Reload URLs"),
+    ("GET", r"^/admin/dashboard$", "Admin: Dashboard stats"),
+    ("GET", r"^/admin/request-logs/stats$", "Admin: Request log stats"),
+    ("GET", r"^/admin/request-logs/storage$", "Admin: Request log storage"),
+    ("GET", r"^/admin/request-logs/export$", "Admin: Export request logs"),
+    ("GET", r"^/admin/request-logs/[0-9]+$", "Admin: Request log detail"),
+    ("GET", r"^/admin/request-logs$", "Admin: List request logs"),
+    ("GET", r"^/admin/ban-requests$", "Admin: List ban requests"),
+    ("POST", r"^/admin/ban-requests/[^/]+/resolve$", "Admin: Resolve ban request"),
+    ("GET", r"^/admin/fp-reports$", "Admin: List FP reports"),
+    ("POST", r"^/admin/fp-reports/[^/]+/resolve$", "Admin: Resolve FP report"),
+    ("GET", r"^/admin/scammers$", "Admin: List scammers"),
+    ("POST", r"^/admin/scammers$", "Admin: Add scammer"),
+    ("DELETE", r"^/admin/scammers/[^/]+$", "Admin: Delete scammer"),
+    ("GET", r"^/admin/users$", "Admin: List admin users"),
+    ("POST", r"^/admin/users$", "Admin: Add admin user"),
+    ("DELETE", r"^/admin/users/[^/]+$", "Admin: Delete admin user"),
+    ("PATCH", r"^/admin/users/[^/]+/password$", "Admin: Change admin password"),
+    ("GET", r"^/admin/master-key$", "Admin: Get master key"),
+    ("POST", r"^/admin/master-key$", "Admin: Set master key"),
+    ("GET", r"^/admin/prompt$", "Admin: Get scam prompt"),
+    ("POST", r"^/admin/prompt$", "Admin: Update scam prompt"),
+]
+_ROUTE_DISPLAY_COMPILED: List[Tuple[Optional[str], re.Pattern[str], str]] = [
+    (method, re.compile(pattern), name) for method, pattern, name in ROUTE_DISPLAY_NAMES
+]
+
+
+def _resolve_endpoint_name(method: str, path: str) -> str:
+    for route_method, pattern, name in _ROUTE_DISPLAY_COMPILED:
+        if route_method is not None and route_method != method:
+            continue
+        if pattern.search(path):
+            return name
+    return f"{method} {path}"
+
+
+def _sanitize_headers_for_log(headers: Any) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for k, v in headers.items():
+        key = k.lower()
+        if key == "authorization":
+            out[k] = "[REDACTED]"
+        else:
+            out[k] = v
+    return out
+
+
+def _body_to_text(raw: bytes, content_type: Optional[str]) -> str:
+    if not raw:
+        return ""
+    if content_type and "application/json" in content_type.lower():
+        try:
+            return json.dumps(json.loads(raw.decode("utf-8", errors="replace")), ensure_ascii=False)
+        except Exception:
+            pass
+    try:
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return repr(raw[:8192])
+
+
+def _extract_error_detail(response_body: str, status_code: int) -> Optional[str]:
+    if status_code < 400 or not response_body:
+        return None
+    try:
+        data = json.loads(response_body)
+        if isinstance(data, dict) and data.get("detail") is not None:
+            detail = data["detail"]
+            if isinstance(detail, str):
+                return detail[:2048]
+            return json.dumps(detail, ensure_ascii=False)[:2048]
+    except Exception:
+        pass
+    return None
+
+
+async def _resolve_api_key_auth(x_api_key: str) -> Tuple[str, str, str]:
+    """Returns (auth_kind, api_key, api_key_label)."""
+    master_key = await db.master_key_get()
+    if master_key and x_api_key == master_key:
+        return "master", x_api_key, ""
+    meta = await db.api_key_get(x_api_key)
+    if not meta:
+        return "invalid_key", x_api_key, ""
+    expires_at = meta.get("expires_at")
+    if expires_at:
+        try:
+            exp = _parse_utc_iso_z(expires_at)
+            if datetime.now(timezone.utc) >= exp:
+                return "expired_key", x_api_key, meta.get("label") or ""
+        except Exception:
+            pass
+    return "api_key", x_api_key, meta.get("label") or ""
+
+
+async def _persist_request_log(**kwargs: Any) -> None:
+    try:
+        await db.request_log_insert(**kwargs)
+    except Exception:
+        log.exception("request log insert failed")
+
+
+async def _emit_request_log(
+    *,
+    request: Request,
+    request_id: str,
+    method: str,
+    path: str,
+    query_string: str,
+    endpoint_name: str,
+    status_code: int,
+    elapsed_ms: int,
+    auth_kind: str,
+    api_key: str,
+    api_key_label: str,
+    request_body_bytes: bytes,
+    response_body_bytes: bytes,
+    response_headers: Dict[str, str],
+    exception_type: Optional[str] = None,
+    exception_trace: Optional[str] = None,
+    rate_limited: bool = False,
+) -> None:
+    admin_username = getattr(request.state, "admin_user", None)
+    if path.startswith("/admin") and not path.startswith("/admin/static"):
+        if admin_username:
+            auth_kind = "admin"
+        elif getattr(request.state, "admin_login_failed", False):
+            auth_kind = "admin_login_failed"
+
+    ct_req = request.headers.get("content-type")
+    ct_resp = response_headers.get("content-type") or response_headers.get("Content-Type")
+    req_text = _body_to_text(request_body_bytes, ct_req)
+    resp_text = _body_to_text(response_body_bytes, ct_resp)
+    is_slow = LOG_SLOW_MS > 0 and elapsed_ms >= LOG_SLOW_MS
+    is_error = status_code >= 400
+
+    asyncio.create_task(
+        _persist_request_log(
+            request_id=request_id,
+            method=method,
+            path=path,
+            query_string=query_string or None,
+            endpoint_name=endpoint_name,
+            status_code=status_code,
+            time_ms=elapsed_ms,
+            api_key=api_key,
+            api_key_label=api_key_label,
+            auth_kind=auth_kind,
+            admin_username=admin_username,
+            admin_audit_action=getattr(request.state, "admin_audit_action", None),
+            client_ip=_get_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            referer=request.headers.get("referer"),
+            request_headers=_sanitize_headers_for_log(request.headers),
+            response_headers=_sanitize_headers_for_log(response_headers),
+            request_body=req_text,
+            response_body=resp_text,
+            error_detail=_extract_error_detail(resp_text, status_code),
+            is_slow=is_slow,
+            is_error=is_error,
+            request_bytes=len(request_body_bytes),
+            response_bytes=len(response_body_bytes),
+            content_type_request=ct_req,
+            content_type_response=ct_resp,
+            exception_type=exception_type,
+            exception_trace=exception_trace,
+            rate_limited=rate_limited,
+        )
+    )
+
+
 async def _caller_label(request: Request) -> str:
     key = request.headers.get("X-API-Key")
     if not key:
@@ -916,11 +1152,28 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     start = time.perf_counter()
     method = request.method
     path = request.url.path or "/"
+    query_string = request.url.query or ""
+    endpoint_name = _resolve_endpoint_name(method, path)
+
+    auth_kind = "none"
+    api_key = ""
+    api_key_label = ""
+    x_api_key = request.headers.get("X-API-Key")
+    if x_api_key:
+        auth_kind, api_key, api_key_label = await _resolve_api_key_auth(x_api_key)
+
+    request_body_bytes = await request.body()
+
+    async def receive():
+        return {"type": "http.request", "body": request_body_bytes, "more_body": False}
+
+    request = Request(request.scope, receive)
+
+    rate_limited = False
     if path.startswith("/admin") and path not in ("/admin", "/admin/") and not path.startswith("/admin/static"):
         bypass = False
-        api_key = request.headers.get("X-API-Key")
-        if api_key:
-            meta = await db.api_key_get(api_key)
+        if x_api_key:
+            meta = await db.api_key_get(x_api_key)
             if meta and meta.get("bypass_ratelimit"):
                 bypass = True
         if not bypass:
@@ -932,34 +1185,146 @@ async def request_id_and_timing_middleware(request: Request, call_next):
             while q and now - q[0] > 60:
                 q.popleft()
             if len(q) >= _ADMIN_RATE_LIMIT:
-                return JSONResponse(status_code=429, content={"detail": "Too many requests", "request_id": request_id})
+                elapsed_ms = int((time.perf_counter() - start) * 1000)
+                resp_payload = {"detail": "Too many requests", "request_id": request_id}
+                resp_body_bytes = json.dumps(resp_payload).encode("utf-8")
+                response = JSONResponse(status_code=429, content=resp_payload)
+                response.headers["X-Request-ID"] = request_id
+                response.headers["X-Response-Time-Ms"] = str(elapsed_ms)
+                await _emit_request_log(
+                    request=request,
+                    request_id=request_id,
+                    method=method,
+                    path=path,
+                    query_string=query_string,
+                    endpoint_name=endpoint_name,
+                    status_code=429,
+                    elapsed_ms=elapsed_ms,
+                    auth_kind=auth_kind,
+                    api_key=api_key,
+                    api_key_label=api_key_label,
+                    request_body_bytes=request_body_bytes,
+                    response_body_bytes=resp_body_bytes,
+                    response_headers=dict(response.headers),
+                    rate_limited=True,
+                )
+                log.info(
+                    "call method=%s path=%s status=429 time_ms=%s auth_kind=%s is_slow=false "
+                    "req_bytes=%s resp_bytes=%s request_id=%s rate_limited=true",
+                    method,
+                    path,
+                    elapsed_ms,
+                    auth_kind,
+                    len(request_body_bytes),
+                    len(resp_body_bytes),
+                    request_id,
+                )
+                return response
             q.append(now)
-    try:
-        caller = await _caller_label(request)
-    except Exception:
-        caller = "error"
+
+    exception_type: Optional[str] = None
+    exception_trace: Optional[str] = None
     try:
         response = await call_next(request)
     except HTTPException as e:
-        response = JSONResponse(status_code=e.status_code, content={"detail": e.detail, "request_id": request_id})
+        response = JSONResponse(
+            status_code=e.status_code,
+            content={"detail": e.detail, "request_id": request_id},
+        )
     except Exception as e:
+        exception_type = type(e).__name__
+        exception_trace = traceback.format_exc()
         log.exception("Unhandled exception: %s", e)
-        response = JSONResponse(status_code=500, content={"detail": "Internal server error", "request_id": request_id})
+        response = JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error", "request_id": request_id},
+        )
 
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     _request_times.append(elapsed_ms)
     global _request_count
     _request_count += 1
+
+    response_body_bytes = b""
+    out_headers: Dict[str, str] = {}
+    if hasattr(response, "headers"):
+        out_headers = dict(response.headers)
+
+    if isinstance(response, StreamingResponse):
+        chunks: List[bytes] = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        response_body_bytes = b"".join(chunks)
+        response = Response(
+            content=response_body_bytes,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+    elif hasattr(response, "body") and response.body is not None:
+        response_body_bytes = bytes(response.body)
+    else:
+        try:
+            body_iter = getattr(response, "body_iterator", None)
+            if body_iter is not None:
+                chunks = [c async for c in body_iter]
+                response_body_bytes = b"".join(chunks)
+                response = Response(
+                    content=response_body_bytes,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    media_type=getattr(response, "media_type", None),
+                )
+        except Exception:
+            response_body_bytes = b""
+
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Response-Time-Ms"] = str(elapsed_ms)
 
-    # Secure headers for admin
     if path.startswith("/admin") and not path.startswith("/admin/static"):
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
 
     status_code = getattr(response, "status_code", 0) or 0
-    log.info("call method=%s path=%s status=%s time_ms=%s caller=%s request_id=%s", method, path, status_code, elapsed_ms, caller, request_id)
+    is_slow = LOG_SLOW_MS > 0 and elapsed_ms >= LOG_SLOW_MS
+
+    await _emit_request_log(
+        request=request,
+        request_id=request_id,
+        method=method,
+        path=path,
+        query_string=query_string,
+        endpoint_name=endpoint_name,
+        status_code=status_code,
+        elapsed_ms=elapsed_ms,
+        auth_kind=auth_kind,
+        api_key=api_key,
+        api_key_label=api_key_label,
+        request_body_bytes=request_body_bytes,
+        response_body_bytes=response_body_bytes,
+        response_headers=out_headers or dict(response.headers),
+        exception_type=exception_type,
+        exception_trace=exception_trace,
+    )
+
+    try:
+        caller = await _caller_label(request)
+    except Exception:
+        caller = "error"
+    log.info(
+        "call method=%s path=%s status=%s time_ms=%s caller=%s auth_kind=%s is_slow=%s "
+        "req_bytes=%s resp_bytes=%s request_id=%s",
+        method,
+        path,
+        status_code,
+        elapsed_ms,
+        caller,
+        auth_kind if not getattr(request.state, "admin_user", None) else "admin",
+        is_slow,
+        len(request_body_bytes),
+        len(response_body_bytes),
+        request_id,
+    )
     return response
 
 # ----------------------------
@@ -1185,7 +1550,7 @@ async def admin_add_url(request: Request, _user: str = Depends(require_admin_aut
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await load_urls_db()
-    await db.admin_audit_log(_user, "url_add", domain, {"type": url_type}, _get_client_ip(request))
+    await _admin_audit(request, _user, "url_add", domain, {"type": url_type})
     return {"ok": True, "domain": domain}
 
 
@@ -1197,7 +1562,7 @@ async def admin_delete_url(domain: str, request: Request, _user: str = Depends(r
         raise HTTPException(status_code=400, detail="Invalid domain")
     await db.url_list_delete(domain)
     await load_urls_db()
-    await db.admin_audit_log(_user, "url_delete", domain, None, _get_client_ip(request))
+    await _admin_audit(request, _user, "url_delete", domain)
     return {"ok": True, "domain": domain}
 
 
@@ -1208,6 +1573,21 @@ async def admin_reload_urls(_user: str = Depends(require_admin_auth)):
     return {"ok": True, "safe_count": len(_KNOWN_SAFE_URLS), "scam_count": len(_KNOWN_SCAM_URLS)}
 
 
+def _parse_log_datetime(value: Optional[str], field: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        raw = value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"Invalid {field} datetime")
+
+
 @app.get("/admin/dashboard")
 async def admin_dashboard(_user: str = Depends(require_admin_auth)):
     """Aggregated stats for admin overview."""
@@ -1216,6 +1596,17 @@ async def admin_dashboard(_user: str = Depends(require_admin_auth)):
     admin_users = await db.admin_auth_get_all()
     api_keys = await db.api_key_get_all()
     avg_ms = int(sum(_request_times) / len(_request_times)) if _request_times else 0
+    errors_24h = 0
+    slow_24h = 0
+    log_storage_mb = 0.0
+    try:
+        counts = await db.request_log_24h_counts()
+        errors_24h = counts["errors_24h"]
+        slow_24h = counts["slow_24h"]
+        storage = await db.request_log_storage_stats()
+        log_storage_mb = storage["storage_mb"]
+    except Exception:
+        log.exception("Failed to load request log dashboard stats")
     return {
         "ok": True,
         "known_scammers_count": len(_KNOWN_SCAMMERS),
@@ -1229,7 +1620,119 @@ async def admin_dashboard(_user: str = Depends(require_admin_auth)):
         "avg_response_ms": avg_ms,
         "uptime_seconds": int(time.perf_counter() - _startup_time),
         "pid": os.getpid(),
+        "errors_24h": errors_24h,
+        "slow_24h": slow_24h,
+        "log_storage_mb": log_storage_mb,
     }
+
+
+@app.get("/admin/request-logs")
+async def admin_list_request_logs(
+    api_key: Optional[str] = None,
+    endpoint_name: Optional[str] = None,
+    status: Optional[int] = None,
+    method: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    q: Optional[str] = None,
+    slow_only: bool = False,
+    errors_only: bool = False,
+    auth_kind: Optional[str] = None,
+    rate_limited: Optional[bool] = None,
+    min_time_ms: Optional[int] = None,
+    max_time_ms: Optional[int] = None,
+    limit: int = 100,
+    offset: int = 0,
+    _user: str = Depends(require_admin_auth),
+):
+    result = await db.request_log_list(
+        api_key=api_key,
+        endpoint_name=endpoint_name,
+        status=status,
+        method=method,
+        since=_parse_log_datetime(since, "since"),
+        until=_parse_log_datetime(until, "until"),
+        q=q,
+        slow_only=slow_only,
+        errors_only=errors_only,
+        auth_kind=auth_kind,
+        rate_limited=rate_limited,
+        min_time_ms=min_time_ms,
+        max_time_ms=max_time_ms,
+        limit=limit,
+        offset=offset,
+    )
+    return {"ok": True, **result}
+
+
+@app.get("/admin/request-logs/stats")
+async def admin_request_log_stats(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    _user: str = Depends(require_admin_auth),
+):
+    stats = await db.request_log_stats(
+        since=_parse_log_datetime(since, "since"),
+        until=_parse_log_datetime(until, "until"),
+    )
+    return {"ok": True, **stats}
+
+
+@app.get("/admin/request-logs/storage")
+async def admin_request_log_storage(_user: str = Depends(require_admin_auth)):
+    storage = await db.request_log_storage_stats()
+    return {"ok": True, **storage}
+
+
+@app.get("/admin/request-logs/export")
+async def admin_request_log_export(
+    api_key: Optional[str] = None,
+    endpoint_name: Optional[str] = None,
+    status: Optional[int] = None,
+    method: Optional[str] = None,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    q: Optional[str] = None,
+    slow_only: bool = False,
+    errors_only: bool = False,
+    auth_kind: Optional[str] = None,
+    rate_limited: Optional[bool] = None,
+    min_time_ms: Optional[int] = None,
+    max_time_ms: Optional[int] = None,
+    limit: int = 10000,
+    _user: str = Depends(require_admin_auth),
+):
+    items = await db.request_log_export(
+        api_key=api_key,
+        endpoint_name=endpoint_name,
+        status=status,
+        method=method,
+        since=_parse_log_datetime(since, "since"),
+        until=_parse_log_datetime(until, "until"),
+        q=q,
+        slow_only=slow_only,
+        errors_only=errors_only,
+        auth_kind=auth_kind,
+        rate_limited=rate_limited,
+        min_time_ms=min_time_ms,
+        max_time_ms=max_time_ms,
+        limit=min(limit, 50000),
+    )
+    body = json.dumps({"ok": True, "count": len(items), "items": items}, ensure_ascii=False)
+    filename = f"request-logs-{_utc_now_z().replace(':', '-')}.json"
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/admin/request-logs/{log_id}")
+async def admin_get_request_log(log_id: int, _user: str = Depends(require_admin_auth)):
+    row = await db.request_log_get(log_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Request log not found")
+    return {"ok": True, "item": row}
 
 
 @app.get("/admin/ban-requests")
@@ -1304,7 +1807,7 @@ async def admin_add_scammer(body: RootScammerBody, request: Request, _user: str 
             )
         except Exception:
             log.exception("Failed to mirror to MariaDB")
-    await db.admin_audit_log(_user, "scammer_add", uid, None, _get_client_ip(request))
+    await _admin_audit(request, _user, "scammer_add", uid)
     return {"ok": True, "user_id": uid}
 
 
@@ -1324,7 +1827,7 @@ async def admin_delete_scammer(user_id: str, request: Request, _user: str = Depe
             await maria_mirror.mirror_global_ban_delete(uid)
         except Exception:
             log.exception("Failed to remove from MariaDB")
-    await db.admin_audit_log(_user, "scammer_delete", uid, None, _get_client_ip(request))
+    await _admin_audit(request, _user, "scammer_delete", uid)
     return {"ok": True, "user_id": uid}
 
 
@@ -1436,12 +1939,12 @@ async def admin_set_prompt(body: AdminPromptBody, request: Request, _user: str =
         raise HTTPException(status_code=400, detail="prompt required")
     _scam_prompt_template = prompt
     await db.app_setting_set(_SCAM_PROMPT_SETTING_KEY, prompt)
-    await db.admin_audit_log(
+    await _admin_audit(
+        request,
         _user,
         "prompt_update",
         "scam_detection_prompt_template",
         {"length": len(prompt)},
-        _get_client_ip(request),
     )
     return {"ok": True, "updated": True, "length": len(prompt)}
 

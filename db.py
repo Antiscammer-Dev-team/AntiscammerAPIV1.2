@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import parse_qs, urlparse
 
@@ -378,6 +378,107 @@ async def init_tables(pool: asyncpg.Pool) -> None:
             # If old columns contain invalid JSON strings, the cast can fail.
             # In that case you'd need a one-time manual cleanup, but this makes the error visible.
             log.exception("Failed to migrate reporter_meta/review columns to JSONB")
+
+        # HTTP request log (unlimited retention; disk grows over time)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "API request log" (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                request_id TEXT NOT NULL,
+                method TEXT NOT NULL,
+                path TEXT NOT NULL,
+                query_string TEXT,
+                endpoint_name TEXT NOT NULL,
+                status_code INTEGER NOT NULL,
+                time_ms INTEGER NOT NULL,
+                api_key TEXT NOT NULL DEFAULT '',
+                api_key_label TEXT NOT NULL DEFAULT '',
+                auth_kind TEXT NOT NULL,
+                admin_username TEXT,
+                admin_audit_action TEXT,
+                client_ip TEXT,
+                user_agent TEXT,
+                referer TEXT,
+                request_headers JSONB,
+                response_headers JSONB,
+                request_body TEXT,
+                response_body TEXT,
+                error_detail TEXT,
+                is_slow BOOLEAN NOT NULL DEFAULT FALSE,
+                is_error BOOLEAN NOT NULL DEFAULT FALSE,
+                request_bytes INTEGER NOT NULL DEFAULT 0,
+                response_bytes INTEGER NOT NULL DEFAULT 0,
+                content_type_request TEXT,
+                content_type_response TEXT,
+                exception_type TEXT,
+                exception_trace TEXT,
+                rate_limited BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        """)
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_created_at
+            ON "API request log" (created_at DESC)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_api_key_created
+            ON "API request log" (api_key, created_at DESC)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_endpoint_created
+            ON "API request log" (endpoint_name, created_at DESC)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_status_code
+            ON "API request log" (status_code)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_is_error_created
+            ON "API request log" (is_error, created_at DESC)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_is_slow_created
+            ON "API request log" (is_slow, created_at DESC)
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_request_id
+            ON "API request log" (request_id)
+            """
+        )
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "API request log hourly" (
+                hour_bucket TIMESTAMPTZ NOT NULL,
+                api_key TEXT NOT NULL DEFAULT '',
+                endpoint_name TEXT NOT NULL DEFAULT '',
+                count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                slow_count INTEGER NOT NULL DEFAULT 0,
+                sum_time_ms BIGINT NOT NULL DEFAULT 0,
+                max_time_ms INTEGER NOT NULL DEFAULT 0,
+                sum_request_bytes BIGINT NOT NULL DEFAULT 0,
+                sum_response_bytes BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (hour_bucket, api_key, endpoint_name)
+            )
+        """)
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_request_log_hourly_bucket
+            ON "API request log hourly" (hour_bucket DESC)
+            """
+        )
 
     log.info("Database tables initialized")
 
@@ -1127,3 +1228,556 @@ def _row_to_case_record(row: asyncpg.Record) -> Dict[str, Any]:
         out["review"] = rv if isinstance(rv, dict) else json.loads(rv)
 
     return out
+
+
+# ----------------------------
+# API request log
+# ----------------------------
+def _dt_to_iso_z(dt: Any) -> Optional[str]:
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return str(dt)
+
+
+def _request_log_row_summary(row: asyncpg.Record) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "created_at": _dt_to_iso_z(row["created_at"]),
+        "request_id": row["request_id"],
+        "method": row["method"],
+        "path": row["path"],
+        "query_string": row["query_string"],
+        "endpoint_name": row["endpoint_name"],
+        "status_code": row["status_code"],
+        "time_ms": row["time_ms"],
+        "api_key": row["api_key"] or "",
+        "api_key_label": row["api_key_label"] or "",
+        "auth_kind": row["auth_kind"],
+        "admin_username": row["admin_username"],
+        "admin_audit_action": row["admin_audit_action"],
+        "client_ip": row["client_ip"],
+        "user_agent": row["user_agent"],
+        "referer": row["referer"],
+        "error_detail": row["error_detail"],
+        "is_slow": bool(row["is_slow"]),
+        "is_error": bool(row["is_error"]),
+        "request_bytes": row["request_bytes"] or 0,
+        "response_bytes": row["response_bytes"] or 0,
+        "content_type_request": row["content_type_request"],
+        "content_type_response": row["content_type_response"],
+        "rate_limited": bool(row["rate_limited"]),
+    }
+
+
+def _request_log_row_full(row: asyncpg.Record) -> Dict[str, Any]:
+    out = _request_log_row_summary(row)
+    rh = row.get("request_headers")
+    if rh is not None and not isinstance(rh, dict):
+        try:
+            rh = json.loads(rh)
+        except Exception:
+            rh = None
+    sh = row.get("response_headers")
+    if sh is not None and not isinstance(sh, dict):
+        try:
+            sh = json.loads(sh)
+        except Exception:
+            sh = None
+    out["request_headers"] = rh
+    out["response_headers"] = sh
+    out["request_body"] = row["request_body"]
+    out["response_body"] = row["response_body"]
+    out["exception_type"] = row["exception_type"]
+    out["exception_trace"] = row["exception_trace"]
+    return out
+
+
+async def request_log_insert(
+    *,
+    request_id: str,
+    method: str,
+    path: str,
+    query_string: Optional[str],
+    endpoint_name: str,
+    status_code: int,
+    time_ms: int,
+    api_key: str = "",
+    api_key_label: str = "",
+    auth_kind: str,
+    admin_username: Optional[str] = None,
+    admin_audit_action: Optional[str] = None,
+    client_ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    referer: Optional[str] = None,
+    request_headers: Optional[Dict[str, Any]] = None,
+    response_headers: Optional[Dict[str, Any]] = None,
+    request_body: Optional[str] = None,
+    response_body: Optional[str] = None,
+    error_detail: Optional[str] = None,
+    is_slow: bool = False,
+    is_error: bool = False,
+    request_bytes: int = 0,
+    response_bytes: int = 0,
+    content_type_request: Optional[str] = None,
+    content_type_response: Optional[str] = None,
+    exception_type: Optional[str] = None,
+    exception_trace: Optional[str] = None,
+    rate_limited: bool = False,
+) -> None:
+    pool = get_pool()
+    is_err = is_error or status_code >= 400
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO "API request log" (
+                request_id, method, path, query_string, endpoint_name,
+                status_code, time_ms, api_key, api_key_label, auth_kind,
+                admin_username, admin_audit_action, client_ip, user_agent, referer,
+                request_headers, response_headers, request_body, response_body,
+                error_detail, is_slow, is_error, request_bytes, response_bytes,
+                content_type_request, content_type_response,
+                exception_type, exception_trace, rate_limited
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                $20, $21, $22, $23, $24, $25, $26, $27, $28, $29
+            )
+            """,
+            request_id,
+            method,
+            path,
+            query_string,
+            endpoint_name,
+            status_code,
+            time_ms,
+            api_key or "",
+            api_key_label or "",
+            auth_kind,
+            admin_username,
+            admin_audit_action,
+            client_ip,
+            user_agent,
+            referer,
+            _jsonb_val(request_headers) if request_headers else None,
+            _jsonb_val(response_headers) if response_headers else None,
+            request_body,
+            response_body,
+            error_detail,
+            is_slow,
+            is_err,
+            request_bytes,
+            response_bytes,
+            content_type_request,
+            content_type_response,
+            exception_type,
+            exception_trace,
+            rate_limited,
+        )
+        hour_bucket = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        await conn.execute(
+            """
+            INSERT INTO "API request log hourly" (
+                hour_bucket, api_key, endpoint_name,
+                count, error_count, slow_count,
+                sum_time_ms, max_time_ms, sum_request_bytes, sum_response_bytes
+            ) VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (hour_bucket, api_key, endpoint_name) DO UPDATE SET
+                count = "API request log hourly".count + 1,
+                error_count = "API request log hourly".error_count + EXCLUDED.error_count,
+                slow_count = "API request log hourly".slow_count + EXCLUDED.slow_count,
+                sum_time_ms = "API request log hourly".sum_time_ms + EXCLUDED.sum_time_ms,
+                max_time_ms = GREATEST("API request log hourly".max_time_ms, EXCLUDED.max_time_ms),
+                sum_request_bytes = "API request log hourly".sum_request_bytes + EXCLUDED.sum_request_bytes,
+                sum_response_bytes = "API request log hourly".sum_response_bytes + EXCLUDED.sum_response_bytes
+            """,
+            hour_bucket,
+            api_key or "",
+            endpoint_name,
+            1 if is_err else 0,
+            1 if is_slow else 0,
+            time_ms,
+            time_ms,
+            request_bytes,
+            response_bytes,
+        )
+
+
+async def request_log_list(
+    *,
+    api_key: Optional[str] = None,
+    endpoint_name: Optional[str] = None,
+    status: Optional[int] = None,
+    method: Optional[str] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    q: Optional[str] = None,
+    slow_only: bool = False,
+    errors_only: bool = False,
+    auth_kind: Optional[str] = None,
+    rate_limited: Optional[bool] = None,
+    min_time_ms: Optional[int] = None,
+    max_time_ms: Optional[int] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    pool = get_pool()
+    conditions: List[str] = []
+    params: List[Any] = []
+    idx = 1
+
+    def add(cond: str, val: Any) -> None:
+        nonlocal idx
+        conditions.append(cond.format(n=idx))
+        params.append(val)
+        idx += 1
+
+    if api_key is not None:
+        add("api_key = ${n}", api_key)
+    if endpoint_name is not None:
+        add("endpoint_name = ${n}", endpoint_name)
+    if status is not None:
+        add("status_code = ${n}", status)
+    if method is not None:
+        add("method = ${n}", method.upper())
+    if since is not None:
+        add("created_at >= ${n}", since)
+    if until is not None:
+        add("created_at <= ${n}", until)
+    if slow_only:
+        conditions.append("is_slow = TRUE")
+    if errors_only:
+        conditions.append("is_error = TRUE")
+    if auth_kind is not None:
+        add("auth_kind = ${n}", auth_kind)
+    if rate_limited is not None:
+        add("rate_limited = ${n}", rate_limited)
+    if min_time_ms is not None:
+        add("time_ms >= ${n}", min_time_ms)
+    if max_time_ms is not None:
+        add("time_ms <= ${n}", max_time_ms)
+    if q:
+        pattern = f"%{q}%"
+        conditions.append(
+            f"(path ILIKE ${idx} OR request_body ILIKE ${idx} OR response_body ILIKE ${idx} "
+            f"OR request_id ILIKE ${idx} OR api_key ILIKE ${idx})"
+        )
+        params.append(pattern)
+        idx += 1
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    limit = max(1, min(limit, 50000))
+    offset = max(0, offset)
+
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            f'SELECT COUNT(*) FROM "API request log"{where}',
+            *params,
+        )
+        rows = await conn.fetch(
+            f"""
+            SELECT id, created_at, request_id, method, path, query_string, endpoint_name,
+                   status_code, time_ms, api_key, api_key_label, auth_kind,
+                   admin_username, admin_audit_action, client_ip, user_agent, referer,
+                   error_detail, is_slow, is_error, request_bytes, response_bytes,
+                   content_type_request, content_type_response, rate_limited
+            FROM "API request log"
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ${idx} OFFSET ${idx + 1}
+            """,
+            *params,
+            limit,
+            offset,
+        )
+    return {
+        "total": total or 0,
+        "limit": limit,
+        "offset": offset,
+        "items": [_request_log_row_summary(r) for r in rows],
+    }
+
+
+async def request_log_get(log_id: int) -> Optional[Dict[str, Any]]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            'SELECT * FROM "API request log" WHERE id = $1',
+            log_id,
+        )
+    if row is None:
+        return None
+    return _request_log_row_full(row)
+
+
+async def request_log_storage_stats() -> Dict[str, Any]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row_count = await conn.fetchval('SELECT COUNT(*) FROM "API request log"')
+        raw_bytes = await conn.fetchval(
+            """
+            SELECT COALESCE(
+                pg_total_relation_size('"API request log"'::regclass)
+                + pg_total_relation_size('"API request log hourly"'::regclass),
+                0
+            )
+            """
+        )
+        hourly_rows = await conn.fetchval('SELECT COUNT(*) FROM "API request log hourly"')
+    return {
+        "row_count": row_count or 0,
+        "hourly_row_count": hourly_rows or 0,
+        "storage_bytes": raw_bytes or 0,
+        "storage_mb": round((raw_bytes or 0) / (1024 * 1024), 2),
+    }
+
+
+async def request_log_24h_counts() -> Dict[str, int]:
+    """Error and slow counts in the last 24 hours."""
+    pool = get_pool()
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE is_error) AS errors_24h,
+                COUNT(*) FILTER (WHERE is_slow) AS slow_24h
+            FROM "API request log"
+            WHERE created_at >= $1
+            """,
+            since,
+        )
+    if row is None:
+        return {"errors_24h": 0, "slow_24h": 0}
+    return {
+        "errors_24h": int(row["errors_24h"] or 0),
+        "slow_24h": int(row["slow_24h"] or 0),
+    }
+
+
+async def request_log_stats(
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    pool = get_pool()
+    now = datetime.now(timezone.utc)
+    if since is None:
+        since = now - timedelta(hours=24)
+    if until is None:
+        until = now
+
+    async with pool.acquire() as conn:
+        totals = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total_count,
+                COUNT(*) FILTER (WHERE is_error) AS error_count,
+                COUNT(*) FILTER (WHERE is_slow) AS slow_count,
+                COALESCE(SUM(request_bytes), 0) AS sum_request_bytes,
+                COALESCE(SUM(response_bytes), 0) AS sum_response_bytes,
+                COALESCE(
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p50_ms,
+                COALESCE(
+                    percentile_cont(0.95) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p95_ms,
+                COALESCE(
+                    percentile_cont(0.99) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p99_ms
+            FROM "API request log"
+            WHERE created_at >= $1 AND created_at <= $2
+            """,
+            since,
+            until,
+        )
+
+        per_key = await conn.fetch(
+            """
+            SELECT
+                api_key,
+                MAX(api_key_label) AS api_key_label,
+                COUNT(*) AS count,
+                COUNT(*) FILTER (WHERE is_error) AS error_count,
+                COUNT(*) FILTER (WHERE is_slow) AS slow_count,
+                COALESCE(SUM(request_bytes), 0) AS sum_request_bytes,
+                COALESCE(SUM(response_bytes), 0) AS sum_response_bytes,
+                COALESCE(
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p50_ms,
+                COALESCE(
+                    percentile_cont(0.95) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p95_ms,
+                COALESCE(
+                    percentile_cont(0.99) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p99_ms
+            FROM "API request log"
+            WHERE created_at >= $1 AND created_at <= $2
+            GROUP BY api_key
+            ORDER BY count DESC
+            """,
+            since,
+            until,
+        )
+
+        per_endpoint = await conn.fetch(
+            """
+            SELECT
+                endpoint_name,
+                COUNT(*) AS count,
+                COUNT(*) FILTER (WHERE is_error) AS error_count,
+                COUNT(*) FILTER (WHERE is_slow) AS slow_count,
+                COALESCE(
+                    percentile_cont(0.5) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p50_ms,
+                COALESCE(
+                    percentile_cont(0.95) WITHIN GROUP (ORDER BY time_ms),
+                    0
+                )::int AS p95_ms
+            FROM "API request log"
+            WHERE created_at >= $1 AND created_at <= $2
+            GROUP BY endpoint_name
+            ORDER BY count DESC
+            """,
+            since,
+            until,
+        )
+
+        hour_since = now - timedelta(hours=24)
+        hourly = await conn.fetch(
+            """
+            SELECT
+                hour_bucket,
+                SUM(count) AS count,
+                SUM(error_count) AS error_count,
+                SUM(slow_count) AS slow_count,
+                SUM(sum_time_ms) AS sum_time_ms
+            FROM "API request log hourly"
+            WHERE hour_bucket >= $1
+            GROUP BY hour_bucket
+            ORDER BY hour_bucket ASC
+            """,
+            hour_since,
+        )
+
+        errors_24h_row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE is_error) AS errors_24h,
+                COUNT(*) FILTER (WHERE is_slow) AS slow_24h
+            FROM "API request log"
+            WHERE created_at >= $1
+            """,
+            hour_since,
+        )
+
+    total_count = int(totals["total_count"] or 0) if totals else 0
+    error_count = int(totals["error_count"] or 0) if totals else 0
+    slow_count = int(totals["slow_count"] or 0) if totals else 0
+
+    def _pct(num: int, den: int) -> float:
+        return round(100.0 * num / den, 2) if den else 0.0
+
+    def _agg_row(r: asyncpg.Record) -> Dict[str, Any]:
+        c = int(r["count"] or 0)
+        ec = int(r["error_count"] or 0)
+        sc = int(r["slow_count"] or 0)
+        out: Dict[str, Any] = {
+            "count": c,
+            "error_count": ec,
+            "slow_count": sc,
+            "error_pct": _pct(ec, c),
+            "slow_pct": _pct(sc, c),
+            "p50_ms": int(r.get("p50_ms") or 0),
+            "p95_ms": int(r.get("p95_ms") or 0),
+        }
+        if "p99_ms" in r:
+            out["p99_ms"] = int(r.get("p99_ms") or 0)
+        if "api_key" in r:
+            out["api_key"] = r["api_key"] or ""
+            out["api_key_label"] = r.get("api_key_label") or ""
+        if "endpoint_name" in r:
+            out["endpoint_name"] = r["endpoint_name"]
+        if "sum_request_bytes" in r:
+            out["sum_request_bytes"] = int(r["sum_request_bytes"] or 0)
+            out["sum_response_bytes"] = int(r["sum_response_bytes"] or 0)
+        return out
+
+    return {
+        "since": _dt_to_iso_z(since),
+        "until": _dt_to_iso_z(until),
+        "total_count": total_count,
+        "error_count": error_count,
+        "slow_count": slow_count,
+        "error_pct": _pct(error_count, total_count),
+        "slow_pct": _pct(slow_count, total_count),
+        "p50_ms": int(totals["p50_ms"] or 0) if totals else 0,
+        "p95_ms": int(totals["p95_ms"] or 0) if totals else 0,
+        "p99_ms": int(totals["p99_ms"] or 0) if totals else 0,
+        "sum_request_bytes": int(totals["sum_request_bytes"] or 0) if totals else 0,
+        "sum_response_bytes": int(totals["sum_response_bytes"] or 0) if totals else 0,
+        "errors_24h": int(errors_24h_row["errors_24h"] or 0) if errors_24h_row else 0,
+        "slow_24h": int(errors_24h_row["slow_24h"] or 0) if errors_24h_row else 0,
+        "per_key": [_agg_row(r) for r in per_key],
+        "per_endpoint": [_agg_row(r) for r in per_endpoint],
+        "hourly_series": [
+            {
+                "hour_bucket": _dt_to_iso_z(r["hour_bucket"]),
+                "count": int(r["count"] or 0),
+                "error_count": int(r["error_count"] or 0),
+                "slow_count": int(r["slow_count"] or 0),
+                "avg_time_ms": (
+                    int(r["sum_time_ms"] or 0) // int(r["count"] or 1)
+                    if int(r["count"] or 0) > 0
+                    else 0
+                ),
+            }
+            for r in hourly
+        ],
+    }
+
+
+async def request_log_export(
+    *,
+    api_key: Optional[str] = None,
+    endpoint_name: Optional[str] = None,
+    status: Optional[int] = None,
+    method: Optional[str] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    q: Optional[str] = None,
+    slow_only: bool = False,
+    errors_only: bool = False,
+    auth_kind: Optional[str] = None,
+    rate_limited: Optional[bool] = None,
+    min_time_ms: Optional[int] = None,
+    max_time_ms: Optional[int] = None,
+    limit: int = 10000,
+) -> List[Dict[str, Any]]:
+    result = await request_log_list(
+        api_key=api_key,
+        endpoint_name=endpoint_name,
+        status=status,
+        method=method,
+        since=since,
+        until=until,
+        q=q,
+        slow_only=slow_only,
+        errors_only=errors_only,
+        auth_kind=auth_kind,
+        rate_limited=rate_limited,
+        min_time_ms=min_time_ms,
+        max_time_ms=max_time_ms,
+        limit=limit,
+        offset=0,
+    )
+    return result["items"]
