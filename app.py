@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import aiohttp
 import pyotp
 from dotenv import load_dotenv
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 load_dotenv()
 
@@ -100,6 +101,31 @@ _GRAFANA_PROXY_STRIP_HEADERS = {
     "te", "trailers", "transfer-encoding", "upgrade",
     "content-length", "content-encoding", "host", "authorization",
 }
+
+# Prometheus metrics — scraped by an internal-only Prometheus instance over
+# the public domain, gated by METRICS_TOKEN (bearer-style header check).
+METRICS_TOKEN = (os.getenv("METRICS_TOKEN") or "").strip()
+
+_METRIC_REQUESTS_TOTAL = Counter(
+    "antiscammer_http_requests_total",
+    "Total HTTP requests handled",
+    ["method", "endpoint", "status_code", "auth_kind"],
+)
+_METRIC_REQUEST_DURATION = Histogram(
+    "antiscammer_http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "endpoint"],
+)
+_METRIC_RATE_LIMITED_TOTAL = Counter(
+    "antiscammer_rate_limited_total",
+    "Requests rejected by the admin rate limiter",
+    ["endpoint"],
+)
+_METRIC_ADMIN_ACTIONS_TOTAL = Counter(
+    "antiscammer_admin_actions_total",
+    "Admin audit actions performed",
+    ["action"],
+)
 
 # ----------------------------
 # In-memory cache for scammers (loaded from DB at startup / reload)
@@ -319,6 +345,7 @@ async def _admin_audit(
     details: Optional[Dict[str, Any]] = None,
 ) -> None:
     request.state.admin_audit_action = action
+    _METRIC_ADMIN_ACTIONS_TOTAL.labels(action=action).inc()
     await db.admin_audit_log(username, action, resource, details, _get_client_ip(request))
 
 
@@ -933,6 +960,7 @@ ROUTE_DISPLAY_NAMES: List[Tuple[Optional[str], str, str]] = [
     ("GET", r"^/$", "Root"),
     ("GET", r"^/health$", "Health check"),
     ("GET", r"^/ready$", "Ready probe"),
+    ("GET", r"^/metrics$", "Prometheus metrics"),
     ("POST", r"^/detect$", "Scam detection"),
     ("POST", r"^/canonicalize$", "Message canonicalize"),
     ("POST", r"^/url-check$", "URL check"),
@@ -1224,6 +1252,11 @@ async def request_id_and_timing_middleware(request: Request, call_next):
                     response_headers=dict(response.headers),
                     rate_limited=True,
                 )
+                _METRIC_RATE_LIMITED_TOTAL.labels(endpoint=endpoint_name).inc()
+                _METRIC_REQUESTS_TOTAL.labels(
+                    method=method, endpoint=endpoint_name, status_code="429", auth_kind=auth_kind
+                ).inc()
+                _METRIC_REQUEST_DURATION.labels(method=method, endpoint=endpoint_name).observe(elapsed_ms / 1000.0)
                 log.info(
                     "call method=%s path=%s status=429 time_ms=%s auth_kind=%s is_slow=false "
                     "req_bytes=%s resp_bytes=%s request_id=%s rate_limited=true",
@@ -1304,24 +1337,31 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     status_code = getattr(response, "status_code", 0) or 0
     is_slow = LOG_SLOW_MS > 0 and elapsed_ms >= LOG_SLOW_MS
 
-    await _emit_request_log(
-        request=request,
-        request_id=request_id,
-        method=method,
-        path=path,
-        query_string=query_string,
-        endpoint_name=endpoint_name,
-        status_code=status_code,
-        elapsed_ms=elapsed_ms,
-        auth_kind=auth_kind,
-        api_key=api_key,
-        api_key_label=api_key_label,
-        request_body_bytes=request_body_bytes,
-        response_body_bytes=response_body_bytes,
-        response_headers=out_headers or dict(response.headers),
-        exception_type=exception_type,
-        exception_trace=exception_trace,
-    )
+    if path != "/metrics":
+        _METRIC_REQUESTS_TOTAL.labels(
+            method=method, endpoint=endpoint_name, status_code=str(status_code), auth_kind=auth_kind
+        ).inc()
+        _METRIC_REQUEST_DURATION.labels(method=method, endpoint=endpoint_name).observe(elapsed_ms / 1000.0)
+
+    if path != "/metrics":
+        await _emit_request_log(
+            request=request,
+            request_id=request_id,
+            method=method,
+            path=path,
+            query_string=query_string,
+            endpoint_name=endpoint_name,
+            status_code=status_code,
+            elapsed_ms=elapsed_ms,
+            auth_kind=auth_kind,
+            api_key=api_key,
+            api_key_label=api_key_label,
+            request_body_bytes=request_body_bytes,
+            response_body_bytes=response_body_bytes,
+            response_headers=out_headers or dict(response.headers),
+            exception_type=exception_type,
+            exception_trace=exception_trace,
+        )
 
     try:
         caller = await _caller_label(request)
@@ -2438,6 +2478,17 @@ async def twofa_status(
 @app.get("/ready")
 async def ready():
     return {"ok": True}
+
+
+@app.get("/metrics")
+async def metrics(authorization: Optional[str] = Header(None)):
+    """Prometheus scrape endpoint. Gated by METRICS_TOKEN (Bearer token), not public."""
+    if not METRICS_TOKEN:
+        raise HTTPException(status_code=503, detail="Metrics not configured (set METRICS_TOKEN)")
+    expected = f"Bearer {METRICS_TOKEN}"
+    if not authorization or authorization != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/health")
 async def health():
