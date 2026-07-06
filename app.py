@@ -91,6 +91,16 @@ BAN_REPORT_UPLOAD_TOKEN = (os.getenv("BAN_REPORT_UPLOAD_TOKEN") or os.getenv("X-
 BAN_REPORT_CDN_USER = (os.getenv("CDN_USERNAME") or "").strip()
 BAN_REPORT_CDN_PASS = (os.getenv("CDN_PASSWORD") or "").strip()
 
+# Grafana reverse proxy — internal URL only (never expose Grafana's own port publicly).
+# Access is gated by require_admin_auth; the authenticated admin username is forwarded via
+# X-WEBAUTH-USER so Grafana can be configured with auth.proxy for single sign-on.
+GRAFANA_INTERNAL_URL = (os.getenv("GRAFANA_INTERNAL_URL") or "").strip().rstrip("/")
+_GRAFANA_PROXY_STRIP_HEADERS = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+    "content-length", "content-encoding", "host", "authorization",
+}
+
 # ----------------------------
 # In-memory cache for scammers (loaded from DB at startup / reload)
 # ----------------------------
@@ -956,6 +966,7 @@ ROUTE_DISPLAY_NAMES: List[Tuple[Optional[str], str, str]] = [
     ("GET", r"^/admin/?$", "Admin: Dashboard page"),
     ("GET", r"^/admin/admin\.js$", "Admin: Legacy JS"),
     (None, r"^/admin/static/", "Admin: Static asset"),
+    (None, r"^/admin/grafana(/.*)?$", "Admin: Grafana proxy"),
     ("GET", r"^/admin/keys$", "Admin: List API keys"),
     ("GET", r"^/admin/generate-key$", "Admin: Generate API key"),
     ("POST", r"^/admin/keys$", "Admin: Add API key"),
@@ -1170,7 +1181,12 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     request = Request(request.scope, receive)
 
     rate_limited = False
-    if path.startswith("/admin") and path not in ("/admin", "/admin/") and not path.startswith("/admin/static"):
+    if (
+        path.startswith("/admin")
+        and path not in ("/admin", "/admin/")
+        and not path.startswith("/admin/static")
+        and not path.startswith("/admin/grafana")
+    ):
         bypass = False
         if x_api_key:
             meta = await db.api_key_get(x_api_key)
@@ -1434,6 +1450,55 @@ async def admin_js():
     """Legacy: serve admin.js from project root for fallback HTML."""
     js_path = Path(__file__).with_name("admin.js")
     return Response(content=js_path.read_text(encoding="utf-8"), media_type="application/javascript")
+
+
+async def _admin_grafana_proxy(path: str, request: Request, username: str) -> Response:
+    if not GRAFANA_INTERNAL_URL:
+        raise HTTPException(status_code=503, detail="Grafana is not configured (set GRAFANA_INTERNAL_URL)")
+
+    target_url = f"{GRAFANA_INTERNAL_URL}/admin/grafana/{path}"
+    if request.url.query:
+        target_url += "?" + request.url.query
+
+    forward_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in _GRAFANA_PROXY_STRIP_HEADERS
+    }
+    # Trusted proxy header for Grafana auth.proxy — safe only because Grafana's own
+    # port must never be exposed publicly, so this header can only originate here.
+    forward_headers["X-WEBAUTH-USER"] = username
+
+    body = await request.body()
+    session: aiohttp.ClientSession = request.app.state.http_session
+    try:
+        async with session.request(
+            request.method,
+            target_url,
+            headers=forward_headers,
+            data=body or None,
+            allow_redirects=False,
+        ) as upstream:
+            content = await upstream.read()
+            response = Response(content=content, status_code=upstream.status)
+            for k, v in upstream.headers.items():
+                if k.lower() in _GRAFANA_PROXY_STRIP_HEADERS:
+                    continue
+                response.headers.append(k, v)
+            return response
+    except aiohttp.ClientError as e:
+        log.warning("Grafana proxy error: %s", e)
+        raise HTTPException(status_code=502, detail="Grafana upstream unavailable")
+
+
+@app.api_route("/admin/grafana", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def admin_grafana_root(request: Request, _user: str = Depends(require_admin_auth)):
+    return await _admin_grafana_proxy("", request, _user)
+
+
+@app.api_route("/admin/grafana/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def admin_grafana_proxy_path(path: str, request: Request, _user: str = Depends(require_admin_auth)):
+    return await _admin_grafana_proxy(path, request, _user)
+
 
 @app.get("/admin/keys")
 async def admin_list_keys(_user: str = Depends(require_admin_auth)):

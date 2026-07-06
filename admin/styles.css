@@ -25,6 +25,8 @@ section { margin-bottom: 1.5rem; }
 .tabs { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-bottom: 1rem; border-bottom: 1px solid #333; }
 .tabs button { margin: 0; border-radius: 4px 4px 0 0; background: #2a2a3e; border: 1px solid #333; border-bottom: none; }
 .tabs button.active { background: #3d5a80; border-color: #3d5a80; }
+.tabs a { display: inline-flex; align-items: center; padding: 0.4rem 0.75rem; margin: 0; border-radius: 4px 4px 0 0; background: #2a2a3e; border: 1px solid #333; border-bottom: none; color: inherit; text-decoration: none; }
+.tabs a:hover { background: #3d5a80; }
 .tab-panel { display: none; padding: 1rem 0; }
 .tab-panel.active { display: block; }
 
