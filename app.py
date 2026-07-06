@@ -109,22 +109,53 @@ METRICS_TOKEN = (os.getenv("METRICS_TOKEN") or "").strip()
 _METRIC_REQUESTS_TOTAL = Counter(
     "antiscammer_http_requests_total",
     "Total HTTP requests handled",
-    ["method", "endpoint", "status_code", "auth_kind"],
+    ["method", "endpoint", "status_code", "auth_kind", "api_key_label"],
 )
 _METRIC_REQUEST_DURATION = Histogram(
     "antiscammer_http_request_duration_seconds",
     "HTTP request duration in seconds",
     ["method", "endpoint"],
 )
+_METRIC_REQUEST_SIZE = Histogram(
+    "antiscammer_http_request_size_bytes",
+    "HTTP request body size in bytes",
+    ["endpoint"],
+    buckets=(64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, float("inf")),
+)
+_METRIC_RESPONSE_SIZE = Histogram(
+    "antiscammer_http_response_size_bytes",
+    "HTTP response body size in bytes",
+    ["endpoint"],
+    buckets=(64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, float("inf")),
+)
 _METRIC_RATE_LIMITED_TOTAL = Counter(
     "antiscammer_rate_limited_total",
     "Requests rejected by the admin rate limiter",
     ["endpoint"],
 )
+_METRIC_SLOW_REQUESTS_TOTAL = Counter(
+    "antiscammer_slow_requests_total",
+    "Requests that exceeded LOG_SLOW_MS",
+    ["endpoint"],
+)
+_METRIC_EXCEPTIONS_TOTAL = Counter(
+    "antiscammer_exceptions_total",
+    "Unhandled exceptions by type",
+    ["endpoint", "exception_type"],
+)
 _METRIC_ADMIN_ACTIONS_TOTAL = Counter(
     "antiscammer_admin_actions_total",
     "Admin audit actions performed",
     ["action"],
+)
+# Catch-all for dependencies that fail without surfacing as an HTTP error to
+# any caller — Discord webhooks, the ban-report CDN, Ollama, the MariaDB
+# mirror, and the request-log DB write. These would otherwise only show up
+# as a WARNING/ERROR log line nobody is watching.
+_METRIC_EXTERNAL_FAILURES_TOTAL = Counter(
+    "antiscammer_external_failures_total",
+    "Failures in external dependencies or secondary storage that don't surface as an HTTP error",
+    ["component"],
 )
 
 # ----------------------------
@@ -487,12 +518,14 @@ async def post_banrequest_to_discord_webhook(
             if resp.status >= 300:
                 body = await resp.text()
                 log.warning("Webhook post failed: %s %s", resp.status, body[:500])
+                _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="discord_webhook").inc()
     else:
         async with aiohttp.ClientSession() as fallback:
             async with fallback.post(DISCORD_WEBHOOK_URL, data=data) as resp:
                 if resp.status >= 300:
                     body = await resp.text()
                     log.warning("Webhook post failed: %s %s", resp.status, body[:500])
+                    _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="discord_webhook").inc()
 
 
 async def post_falsepositivereport_to_discord_webhook(
@@ -532,12 +565,14 @@ async def post_falsepositivereport_to_discord_webhook(
             if resp.status >= 300:
                 body = await resp.text()
                 log.warning("False positive webhook post failed: %s %s", resp.status, body[:500])
+                _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="discord_fp_webhook").inc()
     else:
         async with aiohttp.ClientSession() as fallback:
             async with fallback.post(DISCORD_FALSE_POSITIVE_WEBHOOK_URL, data=data) as resp:
                 if resp.status >= 300:
                     body = await resp.text()
                     log.warning("False positive webhook post failed: %s %s", resp.status, body[:500])
+                    _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="discord_fp_webhook").inc()
 
 async def upload_banreport_proof_to_interna(
     *,
@@ -564,6 +599,7 @@ async def upload_banreport_proof_to_interna(
                 if resp.status >= 300:
                     body = await resp.text()
                     log.warning("Ban report CDN upload failed %s: %s", resp.status, body[:500])
+                    _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="ban_report_cdn").inc()
                     return None
                 try:
                     result = await resp.json()
@@ -581,6 +617,7 @@ async def upload_banreport_proof_to_interna(
             return await _post(fallback)
     except Exception as e:
         log.warning("Ban report CDN upload error: %s", e)
+        _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="ban_report_cdn").inc()
         return None
 
 # ----------------------------
@@ -759,6 +796,7 @@ async def detect_scam(
                 log.warning("[OLLAMA ERROR] %s: %s", resp.status, raw_txt[:500])
                 if resp.status == 401:
                     log.warning("[OLLAMA] 401 Unauthorized: set OLLAMA_API_KEY for https://ollama.com/api (cloud auth required)")
+                _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="ollama").inc()
                 return {
                     "is_scam": force_scam,
                     "decision": "scam" if force_scam else "uncertain",
@@ -770,6 +808,7 @@ async def detect_scam(
             data = await resp.json()
     except Exception as e:
         log.warning("[OLLAMA EXCEPTION] %s", e)
+        _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="ollama").inc()
         return {
             "is_scam": force_scam,
             "decision": "scam" if force_scam else "uncertain",
@@ -1105,6 +1144,7 @@ async def _persist_request_log(**kwargs: Any) -> None:
         await db.request_log_insert(**kwargs)
     except Exception:
         log.exception("request log insert failed")
+        _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="request_log_db").inc()
 
 
 async def _emit_request_log(
@@ -1254,9 +1294,15 @@ async def request_id_and_timing_middleware(request: Request, call_next):
                 )
                 _METRIC_RATE_LIMITED_TOTAL.labels(endpoint=endpoint_name).inc()
                 _METRIC_REQUESTS_TOTAL.labels(
-                    method=method, endpoint=endpoint_name, status_code="429", auth_kind=auth_kind
+                    method=method,
+                    endpoint=endpoint_name,
+                    status_code="429",
+                    auth_kind=auth_kind,
+                    api_key_label=api_key_label,
                 ).inc()
                 _METRIC_REQUEST_DURATION.labels(method=method, endpoint=endpoint_name).observe(elapsed_ms / 1000.0)
+                _METRIC_REQUEST_SIZE.labels(endpoint=endpoint_name).observe(len(request_body_bytes))
+                _METRIC_RESPONSE_SIZE.labels(endpoint=endpoint_name).observe(len(resp_body_bytes))
                 log.info(
                     "call method=%s path=%s status=429 time_ms=%s auth_kind=%s is_slow=false "
                     "req_bytes=%s resp_bytes=%s request_id=%s rate_limited=true",
@@ -1339,9 +1385,19 @@ async def request_id_and_timing_middleware(request: Request, call_next):
 
     if path != "/metrics":
         _METRIC_REQUESTS_TOTAL.labels(
-            method=method, endpoint=endpoint_name, status_code=str(status_code), auth_kind=auth_kind
+            method=method,
+            endpoint=endpoint_name,
+            status_code=str(status_code),
+            auth_kind=auth_kind,
+            api_key_label=api_key_label,
         ).inc()
         _METRIC_REQUEST_DURATION.labels(method=method, endpoint=endpoint_name).observe(elapsed_ms / 1000.0)
+        _METRIC_REQUEST_SIZE.labels(endpoint=endpoint_name).observe(len(request_body_bytes))
+        _METRIC_RESPONSE_SIZE.labels(endpoint=endpoint_name).observe(len(response_body_bytes))
+        if is_slow:
+            _METRIC_SLOW_REQUESTS_TOTAL.labels(endpoint=endpoint_name).inc()
+        if exception_type:
+            _METRIC_EXCEPTIONS_TOTAL.labels(endpoint=endpoint_name, exception_type=exception_type).inc()
 
     if path != "/metrics":
         await _emit_request_log(
@@ -1912,6 +1968,7 @@ async def admin_add_scammer(body: RootScammerBody, request: Request, _user: str 
             )
         except Exception:
             log.exception("Failed to mirror to MariaDB")
+            _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="mariadb_mirror").inc()
     await _admin_audit(request, _user, "scammer_add", uid)
     return {"ok": True, "user_id": uid}
 
@@ -1932,6 +1989,7 @@ async def admin_delete_scammer(user_id: str, request: Request, _user: str = Depe
             await maria_mirror.mirror_global_ban_delete(uid)
         except Exception:
             log.exception("Failed to remove from MariaDB")
+            _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="mariadb_mirror").inc()
     await _admin_audit(request, _user, "scammer_delete", uid)
     return {"ok": True, "user_id": uid}
 
@@ -2211,6 +2269,7 @@ async def root_add_scammer(body: RootScammerBody, _master: str = Depends(require
             log.info("Added user_id=%s to MariaDB global_bans (root/scammers)", uid)
         except Exception:
             log.exception("Failed to add user_id=%s to MariaDB global_bans (root/scammers)", uid)
+            _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="mariadb_mirror").inc()
 
     return {"ok": True, "user_id": uid}
 
@@ -2232,6 +2291,7 @@ async def _do_root_delete_scammer(uid: str) -> None:
             await maria_mirror.mirror_global_ban_delete(uid)
         except Exception:
             log.exception("Failed to remove user_id=%s from MariaDB global_bans", uid)
+            _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="mariadb_mirror").inc()
 
 
 @app.delete("/root/scammers")
@@ -2329,6 +2389,7 @@ async def staff_global_ban(body: GlobalBanBody, _master: str = Depends(require_m
             )
         except Exception:
             log.exception("Failed to mirror global ban to MariaDB for user_id=%s", uid)
+            _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="mariadb_mirror").inc()
 
     return {"ok": True, "user_id": uid}
 
@@ -2847,6 +2908,7 @@ async def resolve_banrequest_case(
                     )
                 except Exception:
                     log.exception("Failed to mirror global ban to MariaDB for user_id=%s case_id=%s", uid, case_id)
+                    _METRIC_EXTERNAL_FAILURES_TOTAL.labels(component="mariadb_mirror").inc()
 
     return {"ok": True, "case_id": data["case_id"], "status": status_val}
 
