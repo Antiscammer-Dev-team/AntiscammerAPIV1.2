@@ -146,6 +146,29 @@ async def mirror_global_ban_insert(
       )
 
 
+async def fetch_all_global_bans() -> dict[str, str]:
+  """
+  Return {user_id: reason} for every row in MariaDB global_bans.
+  Empty dict if mirroring isn't configured or the query fails.
+  """
+  if not _enabled():
+      return {}
+
+  pool = await _get_pool()
+  if pool is None:
+      return {}
+
+  try:
+      async with pool.acquire() as conn:
+          async with conn.cursor() as cur:
+              await cur.execute("SELECT user_id, reason FROM global_bans")
+              rows = await cur.fetchall()
+      return {str(user_id): reason for user_id, reason in rows}
+  except Exception:
+      log.exception("MariaDB global_bans fetch failed")
+      return {}
+
+
 async def mirror_global_ban_delete(user_id: str) -> None:
   """Remove the global_bans row for this user_id (mirror of Postgres delete)."""
   if not _enabled():

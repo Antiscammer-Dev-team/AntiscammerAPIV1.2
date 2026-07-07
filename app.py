@@ -1678,7 +1678,21 @@ async def admin_delete_key(body: AdminDeleteKeyBody, _user: str = Depends(requir
 @app.post("/admin/reload-scammers")
 async def admin_reload_scammers(_user: str = Depends(require_admin_auth)):
     await load_scammers_db()
-    return {"ok": True, "known_scammers_count": len(_KNOWN_SCAMMERS)}
+
+    synced_from_mariadb = 0
+    maria_bans = await maria_mirror.fetch_all_global_bans()
+    for user_id, reason in maria_bans.items():
+        if user_id not in _KNOWN_SCAMMERS:
+            await db.scammer_upsert(user_id, reason)
+            synced_from_mariadb += 1
+    if synced_from_mariadb:
+        await load_scammers_db()
+
+    return {
+        "ok": True,
+        "known_scammers_count": len(_KNOWN_SCAMMERS),
+        "synced_from_mariadb": synced_from_mariadb,
+    }
 
 
 # Admin: URL list
