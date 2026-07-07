@@ -41,7 +41,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
@@ -3028,3 +3028,7 @@ async def get_falsepositivereport_case(case_id: str, _meta: dict = Depends(requi
 @app.get("/")
 def root():
     return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+@app.get("/robots.txt")
+def robots_txt():
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
