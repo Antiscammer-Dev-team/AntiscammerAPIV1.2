@@ -3046,3 +3046,7 @@ def root():
 @app.get("/robots.txt")
 def robots_txt():
     return PlainTextResponse("User-agent: *\nDisallow: /\n")
+
+@app.get("/robot.txt")
+def robots_txt():
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
