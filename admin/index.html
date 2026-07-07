@@ -8,283 +8,349 @@
 </head>
 <body>
   <form id="loginSection" onsubmit="return false">
-    <h2>Admin login</h2>
-    <div class="form-row"><label for="loginUser">Username</label><input type="text" id="loginUser" autocomplete="username"></div>
-    <div class="form-row"><label for="loginPass">Password</label><input type="password" id="loginPass" autocomplete="current-password"></div>
-    <div class="form-row"><button type="button" class="primary" id="btnLogin">Log in</button></div>
+    <div class="login-brand">
+      <div class="login-mark">AS</div>
+      <h1>AntiScammer API</h1>
+      <p class="login-sub">Admin Dashboard</p>
+    </div>
+    <h2>Sign in</h2>
+    <div class="form-row"><label for="loginUser">Username</label><input type="text" id="loginUser" autocomplete="username" placeholder="Username"></div>
+    <div class="form-row"><label for="loginPass">Password</label><input type="password" id="loginPass" autocomplete="current-password" placeholder="Password"></div>
+    <div class="form-row"><button type="button" class="primary block" id="btnLogin">Log in</button></div>
     <div id="loginMsg" class="msg"></div>
   </form>
+
   <div id="mainContent">
-    <p class="logout"><button type="button" id="btnLogout">Log out</button></p>
-    <h1>AntiScammer API – Admin Dashboard</h1>
-    <nav class="tabs" id="tabBar">
-      <button type="button" data-tab="overview">Overview</button>
-      <button type="button" data-tab="apikeys">API Keys</button>
-      <button type="button" data-tab="urls">URL List</button>
-      <button type="button" data-tab="scammers">Scammers</button>
-      <button type="button" data-tab="users">Admin Users</button>
-      <button type="button" data-tab="banrequests">Ban Requests</button>
-      <button type="button" data-tab="fpreports">False Positives</button>
-      <button type="button" data-tab="logs">Request Logs</button>
-      <button type="button" data-tab="settings">Settings</button>
-      <a href="/admin/grafana/" target="_blank" rel="noopener">Grafana &#8599;</a>
-    </nav>
-    <div id="tabOverview" class="tab-panel">
-      <div class="dashboard-cards" id="dashboardCards"></div>
-    </div>
-    <div id="tabApikeys" class="tab-panel">
-      <section>
-        <h2>Add key</h2>
-        <div class="form-row">
-          <label>Key</label>
-          <input type="text" id="newKey" placeholder="ATSM-XXXX-XXXX-XXXX" class="key-mono" size="28">
-          <button type="button" id="btnGen">Generate</button>
-        </div>
-        <div class="form-row">
-          <label>Label</label>
-          <input type="text" id="newLabel" placeholder="e.g. Modora">
-        </div>
-        <div class="form-row">
-          <label>Expires (UTC)</label>
-          <input type="datetime-local" id="newExpires" step="1">
-          <label><input type="checkbox" id="newKeyBypassRatelimit"> Bypass rate limit</label>
-          <button type="button" class="primary" id="btnAddKey">Add key</button>
-        </div>
-        <div id="addKeyMsg" class="msg"></div>
-      </section>
-      <section>
-        <h2>Keys</h2>
-        <div id="listKeyMsg" class="msg"></div>
-        <table>
-          <thead><tr><th>Key</th><th>Label</th><th>Expires</th><th>Bypass RL</th><th></th></tr></thead>
-          <tbody id="keysBody"></tbody>
-        </table>
-      </section>
-    </div>
-    <div id="tabUrls" class="tab-panel">
-      <section>
-        <h2>Add URL</h2>
-        <div class="form-row">
-          <label>Domain</label>
-          <input type="text" id="newUrlDomain" placeholder="example.com">
-        </div>
-        <div class="form-row">
-          <label>Type</label>
-          <select id="newUrlType"><option value="safe">Safe</option><option value="scam">Scam</option></select>
-        </div>
-        <div class="form-row">
-          <label>Reason</label>
-          <input type="text" id="newUrlReason" placeholder="Optional reason">
-          <button type="button" class="primary" id="btnAddUrl">Add</button>
-        </div>
-        <button type="button" id="btnReloadUrls">Reload cache</button>
-        <div id="urlMsg" class="msg"></div>
-      </section>
-      <section>
-        <h2>URL List</h2>
-        <table>
-          <thead><tr><th>Domain</th><th>Type</th><th>Reason</th><th></th></tr></thead>
-          <tbody id="urlsBody"></tbody>
-        </table>
-      </section>
-    </div>
-    <div id="tabScammers" class="tab-panel">
-      <section>
-        <h2>Add scammer</h2>
-        <div class="form-row">
-          <label>User ID</label>
-          <input type="text" id="newScammerId" placeholder="Discord user ID">
-        </div>
-        <div class="form-row">
-          <label>Reason</label>
-          <input type="text" id="newScammerReason" placeholder="Reason">
-          <button type="button" class="primary" id="btnAddScammer">Add</button>
-        </div>
-        <button type="button" id="btnReloadScammers">Reload</button>
-        <div id="scammerMsg" class="msg"></div>
-      </section>
-      <section>
-        <h2>Scammers</h2>
-        <table>
-          <thead><tr><th>User ID</th><th>Reason</th><th></th></tr></thead>
-          <tbody id="scammersBody"></tbody>
-        </table>
-      </section>
-    </div>
-    <div id="tabUsers" class="tab-panel">
-      <section>
-        <h2>Add admin user</h2>
-        <form id="addUserForm" autocomplete="off" onsubmit="return false;">
-          <div class="form-row">
-            <label>Username</label>
-            <input type="text" id="newUserUsername" autocomplete="username">
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark">AS</div>
+          <div class="brand-text">
+            <strong>AntiScammer</strong>
+            <span>Admin</span>
           </div>
-          <div class="form-row">
-            <label>Password</label>
-            <input type="password" id="newUserPassword" autocomplete="new-password">
-            <button type="button" class="primary" id="btnAddUser">Add</button>
+        </div>
+        <nav class="tabs" id="tabBar">
+          <button type="button" data-tab="overview"><svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg><span>Overview</span></button>
+          <button type="button" data-tab="apikeys"><svg class="ic" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M11 12 20 3M16 8l3-3M20 3l1.5 1.5"/></svg><span>API Keys</span></button>
+          <button type="button" data-tab="urls"><svg class="ic" viewBox="0 0 24 24"><path d="M9 17H7a5 5 0 0 1 0-10h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8"/></svg><span>URL List</span></button>
+          <button type="button" data-tab="scammers"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9.5 12l2 2 3.5-3.5"/></svg><span>Scammers</span></button>
+          <button type="button" data-tab="users"><svg class="ic" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c0-3.3 2.5-5.5 5.5-5.5s5.5 2.2 5.5 5.5M16 8.2a3 3 0 1 1 3.5 3M17 13.7c2.3.4 3.5 2.2 3.5 5"/></svg><span>Admin Users</span></button>
+          <button type="button" data-tab="banrequests"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M6.5 6.5l11 11"/></svg><span>Ban Requests</span></button>
+          <button type="button" data-tab="fpreports"><svg class="ic" viewBox="0 0 24 24"><path d="M5 3v18M5 4h11l-2.5 3.5L16 11H5"/></svg><span>False Positives</span></button>
+          <button type="button" data-tab="logs"><svg class="ic" viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M20 19H4"/></svg><span>Request Logs</span></button>
+          <button type="button" data-tab="settings"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M21 12h-2.2M5.2 12H3M18.4 5.6l-1.5 1.5M7.1 16.9l-1.5 1.5M18.4 18.4l-1.5-1.5M7.1 7.1 5.6 5.6"/></svg><span>Settings</span></button>
+        </nav>
+        <div class="sidebar-footer">
+          <a href="/admin/grafana/" target="_blank" rel="noopener" class="sidebar-link">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M9 5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-4"/></svg>
+            <span>Grafana</span>
+          </a>
+          <button type="button" id="btnLogout" class="sidebar-link logout-link">
+            <svg class="ic" viewBox="0 0 24 24"><path d="M9 21H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h4M16 17l5-5-5-5M21 12H9"/></svg>
+            <span>Log out</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="main-area">
+        <main class="content">
+          <div id="tabOverview" class="tab-panel">
+            <div class="page-head">
+              <h1>Overview</h1>
+              <p class="page-sub">Live snapshot of keys, traffic and moderation queues.</p>
+            </div>
+            <div class="dashboard-cards" id="dashboardCards"></div>
           </div>
-        </form>
-        <div id="userMsg" class="msg"></div>
-      </section>
-      <section>
-        <h2>Admin users</h2>
-        <table>
-          <thead><tr><th>Username</th><th></th></tr></thead>
-          <tbody id="usersBody"></tbody>
-        </table>
-      </section>
-    </div>
-    <div id="tabBanrequests" class="tab-panel">
-      <section>
-        <select id="banRequestStatus"><option value="">All</option><option value="pending" selected>Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
-        <button type="button" id="btnLoadBanRequests">Refresh</button>
-      </section>
-      <table>
-        <thead><tr><th>Case</th><th>User</th><th>Reason</th><th>Status</th><th></th></tr></thead>
-        <tbody id="banRequestsBody"></tbody>
-      </table>
-    </div>
-    <div id="tabFpreports" class="tab-panel">
-      <section>
-        <select id="fpReportStatus"><option value="">All</option><option value="pending" selected>Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
-        <button type="button" id="btnLoadFpReports">Refresh</button>
-      </section>
-      <table>
-        <thead><tr><th>Case</th><th>User</th><th>Reason</th><th>Status</th><th></th></tr></thead>
-        <tbody id="fpReportsBody"></tbody>
-      </table>
-    </div>
-    <div id="tabLogs" class="tab-panel logs-panel">
-      <div class="logs-summary" id="logsSummary">
-        <span class="logs-stat"><span class="lbl">Total</span><span class="val" id="logsStatTotal">—</span></span>
-        <span class="logs-stat"><span class="lbl">Errors 24h</span><span class="val err-val" id="logsStatErrors24">—</span></span>
-        <span class="logs-stat"><span class="lbl">Slow 24h</span><span class="val warn-val" id="logsStatSlow24">—</span></span>
-        <span class="logs-stat"><span class="lbl">Avg ms</span><span class="val" id="logsStatAvgMs">—</span></span>
-        <span class="logs-stat"><span class="lbl">P95 ms</span><span class="val" id="logsStatP95">—</span></span>
-        <span class="logs-stat"><span class="lbl">Storage</span><span class="val" id="logsStatStorage">—</span></span>
+
+          <div id="tabApikeys" class="tab-panel">
+            <div class="page-head"><h1>API Keys</h1><p class="page-sub">Issue and manage API keys.</p></div>
+            <section class="panel">
+              <h2>Add key</h2>
+              <div class="form-row">
+                <label>Key</label>
+                <input type="text" id="newKey" placeholder="ATSM-XXXX-XXXX-XXXX" class="key-mono" size="28">
+                <button type="button" id="btnGen">Generate</button>
+              </div>
+              <div class="form-row">
+                <label>Label</label>
+                <input type="text" id="newLabel" placeholder="e.g. Modora">
+              </div>
+              <div class="form-row">
+                <label>Expires (UTC)</label>
+                <input type="datetime-local" id="newExpires" step="1">
+                <label class="inline-check"><input type="checkbox" id="newKeyBypassRatelimit"> Bypass rate limit</label>
+                <button type="button" class="primary" id="btnAddKey">Add key</button>
+              </div>
+              <div id="addKeyMsg" class="msg"></div>
+            </section>
+            <section class="panel">
+              <h2>Keys</h2>
+              <div id="listKeyMsg" class="msg"></div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Key</th><th>Label</th><th>Expires</th><th>Bypass RL</th><th></th></tr></thead>
+                  <tbody id="keysBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div id="tabUrls" class="tab-panel">
+            <div class="page-head"><h1>URL List</h1><p class="page-sub">Manage known safe and scam domains.</p></div>
+            <section class="panel">
+              <h2>Add URL</h2>
+              <div class="form-row">
+                <label>Domain</label>
+                <input type="text" id="newUrlDomain" placeholder="example.com">
+              </div>
+              <div class="form-row">
+                <label>Type</label>
+                <select id="newUrlType"><option value="safe">Safe</option><option value="scam">Scam</option></select>
+              </div>
+              <div class="form-row">
+                <label>Reason</label>
+                <input type="text" id="newUrlReason" placeholder="Optional reason">
+                <button type="button" class="primary" id="btnAddUrl">Add</button>
+              </div>
+              <button type="button" id="btnReloadUrls">Reload cache</button>
+              <div id="urlMsg" class="msg"></div>
+            </section>
+            <section class="panel">
+              <h2>URL List</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Domain</th><th>Type</th><th>Reason</th><th></th></tr></thead>
+                  <tbody id="urlsBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div id="tabScammers" class="tab-panel">
+            <div class="page-head"><h1>Scammers</h1><p class="page-sub">Known scammer user IDs.</p></div>
+            <section class="panel">
+              <h2>Add scammer</h2>
+              <div class="form-row">
+                <label>User ID</label>
+                <input type="text" id="newScammerId" placeholder="Discord user ID">
+              </div>
+              <div class="form-row">
+                <label>Reason</label>
+                <input type="text" id="newScammerReason" placeholder="Reason">
+                <button type="button" class="primary" id="btnAddScammer">Add</button>
+              </div>
+              <button type="button" id="btnReloadScammers">Reload</button>
+              <div id="scammerMsg" class="msg"></div>
+            </section>
+            <section class="panel">
+              <h2>Scammers</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>User ID</th><th>Reason</th><th></th></tr></thead>
+                  <tbody id="scammersBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div id="tabUsers" class="tab-panel">
+            <div class="page-head"><h1>Admin Users</h1><p class="page-sub">Accounts with access to this dashboard.</p></div>
+            <section class="panel">
+              <h2>Add admin user</h2>
+              <form id="addUserForm" autocomplete="off" onsubmit="return false;">
+                <div class="form-row">
+                  <label>Username</label>
+                  <input type="text" id="newUserUsername" autocomplete="username">
+                </div>
+                <div class="form-row">
+                  <label>Password</label>
+                  <input type="password" id="newUserPassword" autocomplete="new-password">
+                  <button type="button" class="primary" id="btnAddUser">Add</button>
+                </div>
+              </form>
+              <div id="userMsg" class="msg"></div>
+            </section>
+            <section class="panel">
+              <h2>Admin users</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Username</th><th></th></tr></thead>
+                  <tbody id="usersBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div id="tabBanrequests" class="tab-panel">
+            <div class="page-head"><h1>Ban Requests</h1><p class="page-sub">Review community-submitted ban requests.</p></div>
+            <section class="panel">
+              <div class="toolbar-row">
+                <select id="banRequestStatus"><option value="">All</option><option value="pending" selected>Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+                <button type="button" id="btnLoadBanRequests">Refresh</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Case</th><th>User</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+                  <tbody id="banRequestsBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div id="tabFpreports" class="tab-panel">
+            <div class="page-head"><h1>False Positives</h1><p class="page-sub">Review reports of incorrectly flagged users.</p></div>
+            <section class="panel">
+              <div class="toolbar-row">
+                <select id="fpReportStatus"><option value="">All</option><option value="pending" selected>Pending</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select>
+                <button type="button" id="btnLoadFpReports">Refresh</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Case</th><th>User</th><th>Reason</th><th>Status</th><th></th></tr></thead>
+                  <tbody id="fpReportsBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <div id="tabLogs" class="tab-panel logs-panel">
+            <div class="page-head"><h1>Request Logs</h1><p class="page-sub">Inspect and filter API traffic.</p></div>
+            <div class="logs-summary" id="logsSummary">
+              <span class="logs-stat"><span class="lbl">Total</span><span class="val" id="logsStatTotal">—</span></span>
+              <span class="logs-stat"><span class="lbl">Errors 24h</span><span class="val err-val" id="logsStatErrors24">—</span></span>
+              <span class="logs-stat"><span class="lbl">Slow 24h</span><span class="val warn-val" id="logsStatSlow24">—</span></span>
+              <span class="logs-stat"><span class="lbl">Avg ms</span><span class="val" id="logsStatAvgMs">—</span></span>
+              <span class="logs-stat"><span class="lbl">P95 ms</span><span class="val" id="logsStatP95">—</span></span>
+              <span class="logs-stat"><span class="lbl">Storage</span><span class="val" id="logsStatStorage">—</span></span>
+            </div>
+            <div class="logs-charts">
+              <div class="logs-chart">
+                <div class="logs-chart-title">Requests / hour</div>
+                <div class="bar-chart" id="logsChartRequests"></div>
+              </div>
+              <div class="logs-chart">
+                <div class="logs-chart-title">Errors / hour</div>
+                <div class="bar-chart" id="logsChartErrors"></div>
+              </div>
+            </div>
+            <div class="logs-subtabs" id="logsSubtabs"></div>
+            <div class="logs-toolbar">
+              <div class="logs-quick-filters">
+                <button type="button" class="logs-qf" data-qf="">All</button>
+                <button type="button" class="logs-qf" data-qf="errors">Errors only</button>
+                <button type="button" class="logs-qf" data-qf="slow">Slow only</button>
+                <button type="button" class="logs-qf" data-qf="429">429</button>
+                <button type="button" class="logs-qf" data-qf="invalid_key">Invalid key</button>
+                <button type="button" class="logs-qf" data-qf="expired_key">Expired key</button>
+              </div>
+              <div class="logs-filters form-row">
+                <label>Endpoint</label>
+                <select id="logsFilterEndpoint"><option value="">All</option></select>
+                <label>Status</label>
+                <input type="text" id="logsFilterStatus" placeholder="e.g. 429" size="5">
+                <label>Method</label>
+                <select id="logsFilterMethod">
+                  <option value="">All</option>
+                  <option>GET</option>
+                  <option>POST</option>
+                  <option>PUT</option>
+                  <option>PATCH</option>
+                  <option>DELETE</option>
+                </select>
+                <label>Auth</label>
+                <select id="logsFilterAuth">
+                  <option value="">All</option>
+                  <option value="valid">valid</option>
+                  <option value="invalid_key">invalid_key</option>
+                  <option value="expired_key">expired_key</option>
+                  <option value="missing">missing</option>
+                  <option value="master">master</option>
+                  <option value="none">none</option>
+                </select>
+                <label>Since</label>
+                <input type="datetime-local" id="logsFilterSince" step="1">
+                <label>Until</label>
+                <input type="datetime-local" id="logsFilterUntil" step="1">
+                <label>Search</label>
+                <input type="text" id="logsFilterQ" placeholder="path, key, request_id…" size="18">
+                <button type="button" id="btnLogsApply">Apply</button>
+                <button type="button" id="btnLogsRefresh">Refresh</button>
+                <label class="inline-check"><input type="checkbox" id="logsAutoRefresh"> Auto 5s</label>
+                <button type="button" id="btnLogsExport">Export JSON</button>
+              </div>
+            </div>
+            <div id="logsMsg" class="msg"></div>
+            <div class="logs-table-wrap">
+              <table class="logs-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Method</th>
+                    <th>Path</th>
+                    <th>Endpoint</th>
+                    <th>Status</th>
+                    <th>ms</th>
+                    <th>API key</th>
+                    <th>Auth</th>
+                    <th>RL</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="logsBody"></tbody>
+              </table>
+            </div>
+            <p class="logs-pager" id="logsPager"></p>
+          </div>
+
+          <div id="logDetailModal" class="modal" hidden>
+            <div class="modal-backdrop" data-action="closeLogModal"></div>
+            <div class="modal-dialog">
+              <div class="modal-header">
+                <h2>Request log detail</h2>
+                <button type="button" class="modal-close" data-action="closeLogModal">&times;</button>
+              </div>
+              <div class="modal-actions">
+                <button type="button" id="btnCopyRequestId">Copy request_id</button>
+                <button type="button" id="btnCopyApiKey">Copy API key</button>
+                <button type="button" id="btnCopyCurl">Copy curl</button>
+                <button type="button" id="btnFilterByRequestId">Filter by request_id</button>
+              </div>
+              <pre class="modal-body" id="logDetailBody"></pre>
+            </div>
+          </div>
+
+          <div id="tabSettings" class="tab-panel">
+            <div class="page-head"><h1>Settings</h1><p class="page-sub">Master key and live detection prompt.</p></div>
+            <section class="panel">
+              <h2>Master API key</h2>
+              <div class="form-row">
+                <label>Current</label>
+                <input type="text" id="masterKeyDisplay" class="key-mono" readonly>
+              </div>
+              <div class="form-row">
+                <label>Set key</label>
+                <input type="text" id="masterKeyInput" placeholder="Paste API key" class="key-mono" size="28">
+                <button type="button" class="primary" id="btnSetMaster">Save</button>
+                <button type="button" class="danger" id="btnClearMaster">Clear</button>
+              </div>
+              <div id="masterMsg" class="msg"></div>
+            </section>
+            <section class="panel">
+              <h2>Live scam detection prompt</h2>
+              <p class="panel-note">Edits apply immediately to new <code>/detect</code> requests.</p>
+              <div class="form-row">
+                <textarea id="promptEditor" rows="16" class="prompt-editor"></textarea>
+              </div>
+              <div class="form-row">
+                <button type="button" id="btnReloadPrompt">Reload</button>
+                <button type="button" class="primary" id="btnSavePrompt">Save prompt</button>
+              </div>
+              <div id="promptMsg" class="msg"></div>
+            </section>
+          </div>
+        </main>
       </div>
-      <div class="logs-charts">
-        <div class="logs-chart">
-          <div class="logs-chart-title">Requests / hour</div>
-          <div class="bar-chart" id="logsChartRequests"></div>
-        </div>
-        <div class="logs-chart">
-          <div class="logs-chart-title">Errors / hour</div>
-          <div class="bar-chart" id="logsChartErrors"></div>
-        </div>
-      </div>
-      <div class="logs-subtabs" id="logsSubtabs"></div>
-      <div class="logs-toolbar">
-        <div class="logs-quick-filters">
-          <button type="button" class="logs-qf" data-qf="">All</button>
-          <button type="button" class="logs-qf" data-qf="errors">Errors only</button>
-          <button type="button" class="logs-qf" data-qf="slow">Slow only</button>
-          <button type="button" class="logs-qf" data-qf="429">429</button>
-          <button type="button" class="logs-qf" data-qf="invalid_key">Invalid key</button>
-          <button type="button" class="logs-qf" data-qf="expired_key">Expired key</button>
-        </div>
-        <div class="logs-filters form-row">
-          <label>Endpoint</label>
-          <select id="logsFilterEndpoint"><option value="">All</option></select>
-          <label>Status</label>
-          <input type="text" id="logsFilterStatus" placeholder="e.g. 429" size="5">
-          <label>Method</label>
-          <select id="logsFilterMethod">
-            <option value="">All</option>
-            <option>GET</option>
-            <option>POST</option>
-            <option>PUT</option>
-            <option>PATCH</option>
-            <option>DELETE</option>
-          </select>
-          <label>Auth</label>
-          <select id="logsFilterAuth">
-            <option value="">All</option>
-            <option value="valid">valid</option>
-            <option value="invalid_key">invalid_key</option>
-            <option value="expired_key">expired_key</option>
-            <option value="missing">missing</option>
-            <option value="master">master</option>
-            <option value="none">none</option>
-          </select>
-          <label>Since</label>
-          <input type="datetime-local" id="logsFilterSince" step="1">
-          <label>Until</label>
-          <input type="datetime-local" id="logsFilterUntil" step="1">
-          <label>Search</label>
-          <input type="text" id="logsFilterQ" placeholder="path, key, request_id…" size="18">
-          <button type="button" id="btnLogsApply">Apply</button>
-          <button type="button" id="btnLogsRefresh">Refresh</button>
-          <label><input type="checkbox" id="logsAutoRefresh"> Auto 5s</label>
-          <button type="button" id="btnLogsExport">Export JSON</button>
-        </div>
-      </div>
-      <div id="logsMsg" class="msg"></div>
-      <div class="logs-table-wrap">
-        <table class="logs-table">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Method</th>
-              <th>Path</th>
-              <th>Endpoint</th>
-              <th>Status</th>
-              <th>ms</th>
-              <th>API key</th>
-              <th>Auth</th>
-              <th>RL</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="logsBody"></tbody>
-        </table>
-      </div>
-      <p class="logs-pager" id="logsPager"></p>
-    </div>
-    <div id="logDetailModal" class="modal" hidden>
-      <div class="modal-backdrop" data-action="closeLogModal"></div>
-      <div class="modal-dialog">
-        <div class="modal-header">
-          <h2>Request log detail</h2>
-          <button type="button" class="modal-close" data-action="closeLogModal">&times;</button>
-        </div>
-        <div class="modal-actions">
-          <button type="button" id="btnCopyRequestId">Copy request_id</button>
-          <button type="button" id="btnCopyApiKey">Copy API key</button>
-          <button type="button" id="btnCopyCurl">Copy curl</button>
-          <button type="button" id="btnFilterByRequestId">Filter by request_id</button>
-        </div>
-        <pre class="modal-body" id="logDetailBody"></pre>
-      </div>
-    </div>
-    <div id="tabSettings" class="tab-panel">
-      <section>
-        <h2>Master API key</h2>
-        <div class="form-row">
-          <label>Current</label>
-          <input type="text" id="masterKeyDisplay" class="key-mono" readonly>
-        </div>
-        <div class="form-row">
-          <label>Set key</label>
-          <input type="text" id="masterKeyInput" placeholder="Paste API key" class="key-mono" size="28">
-          <button type="button" class="primary" id="btnSetMaster">Save</button>
-          <button type="button" class="danger" id="btnClearMaster">Clear</button>
-        </div>
-        <div id="masterMsg" class="msg"></div>
-      </section>
-      <section>
-        <h2>Live scam detection prompt</h2>
-        <p>Edits apply immediately to new `/detect` requests.</p>
-        <div class="form-row">
-          <textarea id="promptEditor" rows="16" style="width:100%; font-family: ui-monospace, monospace;"></textarea>
-        </div>
-        <div class="form-row">
-          <button type="button" id="btnReloadPrompt">Reload</button>
-          <button type="button" class="primary" id="btnSavePrompt">Save prompt</button>
-        </div>
-        <div id="promptMsg" class="msg"></div>
-      </section>
     </div>
   </div>
   <script src="/admin/static/dashboard.js"></script>
