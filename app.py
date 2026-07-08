@@ -26,6 +26,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 load_dotenv()
 
 import db
+import crowdsec_bouncer
 
 try:
     import maria_mirror  # Optional: used to mirror approved bans into a secondary MariaDB
@@ -57,6 +58,33 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("app")
+
+# Apache-combined-format access log streamed over syslog to a standalone
+# CrowdSec service (its own Coolify resource, no shared volume with this
+# app) via the crowdsecurity/apache2-logs parser. Only active when
+# CROWDSEC_SYSLOG_HOST is set.
+CROWDSEC_SYSLOG_HOST = (os.getenv("CROWDSEC_SYSLOG_HOST") or "").strip()
+CROWDSEC_SYSLOG_PORT = int(os.getenv("CROWDSEC_SYSLOG_PORT", "9514"))
+CROWDSEC_SYSLOG_PROTO = (os.getenv("CROWDSEC_SYSLOG_PROTO") or "udp").strip().lower()
+_crowdsec_access_log: Optional[logging.Logger] = None
+if CROWDSEC_SYSLOG_HOST:
+    import socket as _socket
+    from logging.handlers import SysLogHandler
+
+    _socktype = _socket.SOCK_STREAM if CROWDSEC_SYSLOG_PROTO == "tcp" else _socket.SOCK_DGRAM
+    _handler = SysLogHandler(
+        address=(CROWDSEC_SYSLOG_HOST, CROWDSEC_SYSLOG_PORT),
+        facility=SysLogHandler.LOG_LOCAL0,
+        socktype=_socktype,
+    )
+    _handler.append_nul = False  # trailing NUL would break CrowdSec's line grok match
+    _handler.setFormatter(
+        logging.Formatter(fmt="%(asctime)s antiscammer-api app: %(message)s", datefmt="%b %d %H:%M:%S")
+    )
+    _crowdsec_access_log = logging.getLogger("app.access")
+    _crowdsec_access_log.setLevel(logging.INFO)
+    _crowdsec_access_log.propagate = False
+    _crowdsec_access_log.addHandler(_handler)
 
 # ----------------------------
 # Config (SECRETS FROM ENV)
@@ -333,6 +361,50 @@ def _get_client_ip(request: Request) -> str:
     if xff:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+_CLF_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _sanitize_for_clf(value: str, max_len: int = 512) -> str:
+    # Values are attacker-controlled (path, referer, UA); strip quotes/newlines
+    # so a crafted request can't forge extra log lines or break CrowdSec's parser.
+    if not value:
+        return "-"
+    value = value.replace('"', "'")
+    value = re.sub(r"[\r\n\x00-\x1f]", " ", value)
+    return value[:max_len] or "-"
+
+
+def _emit_crowdsec_access_log(
+    *,
+    client_ip: str,
+    admin_username: Optional[str],
+    method: str,
+    path: str,
+    query_string: str,
+    status_code: int,
+    response_bytes: int,
+    referer: Optional[str],
+    user_agent: Optional[str],
+) -> None:
+    if _crowdsec_access_log is None:
+        return
+    now = datetime.now(timezone.utc)
+    ts = f"{now.day:02d}/{_CLF_MONTHS[now.month - 1]}/{now.year}:{now.strftime('%H:%M:%S')} +0000"
+    full_path = path + (f"?{query_string}" if query_string else "")
+    request_line = _sanitize_for_clf(f"{method} {full_path} HTTP/1.1", max_len=2048)
+    user = _sanitize_for_clf(admin_username) if admin_username else "-"
+    ref = _sanitize_for_clf(referer) if referer else "-"
+    ua = _sanitize_for_clf(user_agent) if user_agent else "-"
+    ip = _sanitize_for_clf(client_ip, max_len=64)
+    try:
+        _crowdsec_access_log.info(
+            '%s - %s [%s] "%s" %s %s "%s" "%s"',
+            ip, user, ts, request_line, status_code, response_bytes, ref, ua,
+        )
+    except Exception:
+        log.exception("crowdsec access log write failed")
 
 
 async def require_admin_auth(
@@ -979,9 +1051,21 @@ async def lifespan(app: FastAPI):
         log.info("MariaDB mirror module loaded; global_bans will be written when MARIADB_* env is set.")
     timeout = aiohttp.ClientTimeout(total=20)
     app.state.http_session = aiohttp.ClientSession(timeout=timeout)
+    crowdsec_task: Optional[asyncio.Task] = None
+    if crowdsec_bouncer.ENABLED:
+        crowdsec_task = asyncio.create_task(crowdsec_bouncer.poll_loop(app.state.http_session))
+        log.info("CrowdSec bouncer enabled; polling %s every %ss", crowdsec_bouncer.CROWDSEC_LAPI_URL, crowdsec_bouncer.CROWDSEC_POLL_INTERVAL_SEC)
+    else:
+        log.info("CrowdSec bouncer disabled (set CROWDSEC_LAPI_URL and CROWDSEC_BOUNCER_KEY to enable)")
     try:
         yield
     finally:
+        if crowdsec_task:
+            crowdsec_task.cancel()
+            try:
+                await crowdsec_task
+            except asyncio.CancelledError:
+                pass
         await app.state.http_session.close()
         await db.close_pool()
         log.info("HTTP session closed")
@@ -1233,6 +1317,24 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     path = request.url.path or "/"
     query_string = request.url.query or ""
     endpoint_name = _resolve_endpoint_name(method, path)
+    client_ip = _get_client_ip(request)
+
+    if crowdsec_bouncer.is_banned(client_ip):
+        crowdsec_bouncer.record_block()
+        _emit_crowdsec_access_log(
+            client_ip=client_ip,
+            admin_username=None,
+            method=method,
+            path=path,
+            query_string=query_string,
+            status_code=403,
+            response_bytes=0,
+            referer=request.headers.get("referer"),
+            user_agent=request.headers.get("user-agent"),
+        )
+        response = JSONResponse(status_code=403, content={"detail": "Forbidden", "request_id": request_id})
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     auth_kind = "none"
     api_key = ""
@@ -1303,6 +1405,17 @@ async def request_id_and_timing_middleware(request: Request, call_next):
                 _METRIC_REQUEST_DURATION.labels(method=method, endpoint=endpoint_name).observe(elapsed_ms / 1000.0)
                 _METRIC_REQUEST_SIZE.labels(endpoint=endpoint_name).observe(len(request_body_bytes))
                 _METRIC_RESPONSE_SIZE.labels(endpoint=endpoint_name).observe(len(resp_body_bytes))
+                _emit_crowdsec_access_log(
+                    client_ip=client_ip,
+                    admin_username=None,
+                    method=method,
+                    path=path,
+                    query_string=query_string,
+                    status_code=429,
+                    response_bytes=len(resp_body_bytes),
+                    referer=request.headers.get("referer"),
+                    user_agent=request.headers.get("user-agent"),
+                )
                 log.info(
                     "call method=%s path=%s status=429 time_ms=%s auth_kind=%s is_slow=false "
                     "req_bytes=%s resp_bytes=%s request_id=%s rate_limited=true",
@@ -1417,6 +1530,19 @@ async def request_id_and_timing_middleware(request: Request, call_next):
             response_headers=out_headers or dict(response.headers),
             exception_type=exception_type,
             exception_trace=exception_trace,
+        )
+
+    if path != "/metrics":
+        _emit_crowdsec_access_log(
+            client_ip=client_ip,
+            admin_username=getattr(request.state, "admin_user", None),
+            method=method,
+            path=path,
+            query_string=query_string,
+            status_code=status_code,
+            response_bytes=len(response_body_bytes),
+            referer=request.headers.get("referer"),
+            user_agent=request.headers.get("user-agent"),
         )
 
     try:
