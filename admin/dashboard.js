@@ -66,6 +66,7 @@
     else if (name === 'users') loadUsers();
     else if (name === 'banrequests') loadBanRequests();
     else if (name === 'fpreports') loadFpReports();
+    else if (name === 'crowdsec') loadCrowdsecBans();
     else if (name === 'logs') {
       startLogsTab();
     }
@@ -599,6 +600,27 @@
     } catch (e) { alert(e.message); }
   }
 
+  async function loadCrowdsecBans() {
+    try {
+      const d = await api('GET', '/admin/crowdsec/bans');
+      const statusEl = document.getElementById('crowdsecStatus');
+      if (statusEl) {
+        statusEl.textContent = d.enabled ? d.count + ' active ban' + (d.count === 1 ? '' : 's') : 'CrowdSec bouncer is disabled';
+        statusEl.className = 'msg ' + (d.enabled ? 'ok' : 'err');
+      }
+      const rows = (d.items || []).map(b => `
+        <tr>
+          <td>${esc(b.value)}</td>
+          <td>${esc(b.scope)}</td>
+          <td>${esc(b.scenario || '')}</td>
+          <td>${esc(b.origin || '')}</td>
+          <td>${esc(b.duration || '')}</td>
+          <td>${b.until_at ? esc(toLocalISO(b.until_at)) : 'never'}</td>
+        </tr>`).join('');
+      document.getElementById('crowdsecBansBody').innerHTML = rows || '<tr><td colspan="6">No active bans.</td></tr>';
+    } catch (e) { document.getElementById('crowdsecBansBody').innerHTML = '<tr><td colspan="6">' + esc(e.message) + '</td></tr>'; }
+  }
+
   async function loadFpReports() {
     const status = document.getElementById('fpReportStatus')?.value || '';
     try {
@@ -767,6 +789,8 @@
 
   document.getElementById('btnLoadFpReports')?.addEventListener('click', () => loadFpReports());
   document.getElementById('fpReportStatus')?.addEventListener('change', () => loadFpReports());
+
+  document.getElementById('btnLoadCrowdsecBans')?.addEventListener('click', () => loadCrowdsecBans());
 
   document.getElementById('btnSetMaster')?.addEventListener('click', async () => {
     const key = document.getElementById('masterKeyInput').value.trim();

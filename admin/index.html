@@ -38,6 +38,7 @@
           <button type="button" data-tab="users"><svg class="ic" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19c0-3.3 2.5-5.5 5.5-5.5s5.5 2.2 5.5 5.5M16 8.2a3 3 0 1 1 3.5 3M17 13.7c2.3.4 3.5 2.2 3.5 5"/></svg><span>Admin Users</span></button>
           <button type="button" data-tab="banrequests"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M6.5 6.5l11 11"/></svg><span>Ban Requests</span></button>
           <button type="button" data-tab="fpreports"><svg class="ic" viewBox="0 0 24 24"><path d="M5 3v18M5 4h11l-2.5 3.5L16 11H5"/></svg><span>False Positives</span></button>
+          <button type="button" data-tab="crowdsec"><svg class="ic" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/><path d="M9 9l6 6M15 9l-6 6"/></svg><span>CrowdSec</span></button>
           <button type="button" data-tab="logs"><svg class="ic" viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M20 19H4"/></svg><span>Request Logs</span></button>
           <button type="button" data-tab="settings"><svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M21 12h-2.2M5.2 12H3M18.4 5.6l-1.5 1.5M7.1 16.9l-1.5 1.5M18.4 18.4l-1.5-1.5M7.1 7.1 5.6 5.6"/></svg><span>Settings</span></button>
         </nav>
@@ -214,6 +215,22 @@
             </section>
           </div>
 
+          <div id="tabCrowdsec" class="tab-panel">
+            <div class="page-head"><h1>CrowdSec</h1><p class="page-sub">IPs and ranges currently banned via the CrowdSec decision stream.</p></div>
+            <section class="panel">
+              <div class="toolbar-row">
+                <span id="crowdsecStatus" class="msg"></span>
+                <button type="button" id="btnLoadCrowdsecBans">Refresh</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>IP / Range</th><th>Scope</th><th>Scenario</th><th>Origin</th><th>Duration</th><th>Until</th></tr></thead>
+                  <tbody id="crowdsecBansBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
           <div id="tabLogs" class="tab-panel logs-panel">
             <div class="page-head"><h1>Request Logs</h1><p class="page-sub">Inspect and filter API traffic.</p></div>
             <div class="logs-summary" id="logsSummary">
@@ -353,6 +370,6 @@
       </div>
     </div>
   </div>
-  <script src="/admin/static/dashboard.js?v=2"></script>
+  <script src="/admin/static/dashboard.js?v=3"></script>
 </body>
 </html>

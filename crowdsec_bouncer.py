@@ -12,10 +12,13 @@ import asyncio
 import ipaddress
 import logging
 import os
-from typing import List, Optional, Set, Union
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Union
 
 import aiohttp
 from prometheus_client import Counter, Gauge
+
+import db
 
 log = logging.getLogger("app.crowdsec")
 
@@ -61,12 +64,26 @@ def is_banned(ip: str) -> bool:
     return any(addr in net for net in _banned_networks)
 
 
-def _apply_decisions(new: Optional[list], deleted: Optional[list]) -> None:
+def _parse_until(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        v = value.strip()
+        if v.endswith("Z"):
+            v = v[:-1] + "+00:00"
+        return datetime.fromisoformat(v)
+    except Exception:
+        return None
+
+
+async def _apply_decisions(new: Optional[list], deleted: Optional[list], full_sync: bool) -> None:
     global _banned_networks
+    deleted_values: List[str] = []
     for item in deleted or []:
         value = item.get("value")
         if not value:
             continue
+        deleted_values.append(value)
         if "/" in value:
             try:
                 net = ipaddress.ip_network(value, strict=False)
@@ -76,6 +93,7 @@ def _apply_decisions(new: Optional[list], deleted: Optional[list]) -> None:
         else:
             _banned_ips.discard(value)
 
+    upsert_entries: List[Dict[str, Any]] = []
     for item in new or []:
         if (item.get("type") or "ban").lower() != "ban":
             continue
@@ -89,8 +107,31 @@ def _apply_decisions(new: Optional[list], deleted: Optional[list]) -> None:
                 continue
         else:
             _banned_ips.add(value)
+        upsert_entries.append({
+            "value": value,
+            "scope": item.get("scope") or "Ip",
+            "decision_type": item.get("type") or "ban",
+            "scenario": item.get("scenario"),
+            "origin": item.get("origin"),
+            "duration": item.get("duration"),
+            "until_at": _parse_until(item.get("until")),
+        })
 
     _METRIC_BANNED_IPS.set(len(_banned_ips) + len(_banned_networks))
+
+    try:
+        if full_sync:
+            await db.crowdsec_bans_replace_all(upsert_entries)
+        else:
+            await db.crowdsec_bans_upsert_many(upsert_entries)
+            await db.crowdsec_bans_delete_many(deleted_values)
+    except Exception:
+        log.exception("Failed to persist CrowdSec decisions to DB")
+
+
+async def get_banned_entries() -> List[Dict[str, Any]]:
+    """Currently-active mirrored decisions (for the admin panel), newest-seen first."""
+    return await db.crowdsec_bans_get_all()
 
 
 async def poll_loop(session: aiohttp.ClientSession) -> None:
@@ -104,12 +145,13 @@ async def poll_loop(session: aiohttp.ClientSession) -> None:
 
     while True:
         try:
+            full_sync = not _stream_started
             params = {"startup": "false" if _stream_started else "true"}
             async with session.get(url, headers=headers, params=params) as resp:
                 if resp.status != 200:
                     raise RuntimeError(f"LAPI returned {resp.status}")
                 data = await resp.json(content_type=None)
-                _apply_decisions(data.get("new"), data.get("deleted"))
+                await _apply_decisions(data.get("new"), data.get("deleted"), full_sync)
                 if not _stream_started:
                     log.info("CrowdSec bouncer stream started")
                 _stream_started = True

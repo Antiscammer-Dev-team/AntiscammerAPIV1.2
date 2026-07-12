@@ -311,6 +311,27 @@ async def init_tables(pool: asyncpg.Pool) -> None:
             )
         """)
 
+        # CrowdSec decisions mirrored from the LAPI stream so a currently-banned IP/range
+        # stays visible (and enforceable via a DB read) across restarts, not just in the
+        # bouncer's in-memory cache which is only as fresh as the last poll.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS "CrowdSec bans" (
+                value TEXT PRIMARY KEY,
+                scope TEXT NOT NULL DEFAULT 'Ip',
+                decision_type TEXT NOT NULL DEFAULT 'ban',
+                scenario TEXT,
+                origin TEXT,
+                duration TEXT,
+                until_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_crowdsec_bans_until_at
+            ON "CrowdSec bans" (until_at)
+        """)
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS "Ticket audit sessions" (
                 audit_id TEXT PRIMARY KEY,
@@ -930,6 +951,76 @@ async def url_list_delete(domain: str) -> None:
             'DELETE FROM "URL list" WHERE url_domain = $1',
             domain.lower().strip(),
         )
+
+
+async def crowdsec_bans_replace_all(entries: List[Dict[str, Any]]) -> None:
+    """Wipe and bulk-repopulate the CrowdSec ban mirror. Used on bouncer startup sync,
+    since a full decisions snapshot from the LAPI is the only reliable source of truth
+    for what expired/was removed while this app was offline."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute('DELETE FROM "CrowdSec bans"')
+            if entries:
+                await conn.executemany(
+                    """
+                    INSERT INTO "CrowdSec bans"
+                        (value, scope, decision_type, scenario, origin, duration, until_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (value) DO NOTHING
+                    """,
+                    [
+                        (
+                            e["value"], e.get("scope") or "Ip", e.get("decision_type") or "ban",
+                            e.get("scenario"), e.get("origin"), e.get("duration"), e.get("until_at"),
+                        )
+                        for e in entries
+                    ],
+                )
+
+
+async def crowdsec_bans_upsert_many(entries: List[Dict[str, Any]]) -> None:
+    if not entries:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO "CrowdSec bans" (value, scope, decision_type, scenario, origin, duration, until_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (value) DO UPDATE SET
+                scope = EXCLUDED.scope, decision_type = EXCLUDED.decision_type, scenario = EXCLUDED.scenario,
+                origin = EXCLUDED.origin, duration = EXCLUDED.duration, until_at = EXCLUDED.until_at,
+                updated_at = NOW()
+            """,
+            [
+                (
+                    e["value"], e.get("scope") or "Ip", e.get("decision_type") or "ban",
+                    e.get("scenario"), e.get("origin"), e.get("duration"), e.get("until_at"),
+                )
+                for e in entries
+            ],
+        )
+
+
+async def crowdsec_bans_delete_many(values: List[str]) -> None:
+    if not values:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute('DELETE FROM "CrowdSec bans" WHERE value = ANY($1::text[])', values)
+
+
+async def crowdsec_bans_get_all(include_expired: bool = False) -> List[Dict[str, Any]]:
+    """Return currently-mirrored CrowdSec decisions, most recently seen first."""
+    pool = get_pool()
+    query = 'SELECT * FROM "CrowdSec bans"'
+    if not include_expired:
+        query += " WHERE until_at IS NULL OR until_at > NOW()"
+    query += " ORDER BY updated_at DESC"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(query)
+    return [dict(r) for r in rows]
 
 
 async def admin_audit_log(username: str, action: str, resource: Optional[str] = None, details: Optional[Dict[str, Any]] = None, ip: Optional[str] = None) -> None:

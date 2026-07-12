@@ -1887,6 +1887,31 @@ async def admin_reload_urls(_user: str = Depends(require_admin_auth)):
     return {"ok": True, "safe_count": len(_KNOWN_SAFE_URLS), "scam_count": len(_KNOWN_SCAM_URLS)}
 
 
+@app.get("/admin/crowdsec/bans")
+async def admin_crowdsec_bans(_user: str = Depends(require_admin_auth)):
+    """Currently-banned IPs/ranges mirrored from the CrowdSec LAPI decision stream."""
+    items = await crowdsec_bouncer.get_banned_entries()
+    return {
+        "ok": True,
+        "enabled": crowdsec_bouncer.ENABLED,
+        "count": len(items),
+        "items": [
+            {
+                "value": i["value"],
+                "scope": i["scope"],
+                "decision_type": i["decision_type"],
+                "scenario": i["scenario"],
+                "origin": i["origin"],
+                "duration": i["duration"],
+                "until_at": i["until_at"].isoformat() if i["until_at"] else None,
+                "created_at": i["created_at"].isoformat() if i["created_at"] else None,
+                "updated_at": i["updated_at"].isoformat() if i["updated_at"] else None,
+            }
+            for i in items
+        ],
+    }
+
+
 def _parse_log_datetime(value: Optional[str], field: str) -> Optional[datetime]:
     if not value:
         return None
