@@ -1223,8 +1223,21 @@ async def _resolve_api_key_auth(x_api_key: str) -> Tuple[str, str, str]:
     return "api_key", x_api_key, meta.get("label") or ""
 
 
+def _strip_nul_bytes(value: Any) -> Any:
+    """Postgres text/jsonb columns reject embedded NUL bytes; binary bodies
+    (fonts, images, JS bundles) decoded as text can carry literal 0x00."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        return {k: _strip_nul_bytes(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_strip_nul_bytes(v) for v in value]
+    return value
+
+
 async def _persist_request_log(**kwargs: Any) -> None:
     try:
+        kwargs = {k: _strip_nul_bytes(v) for k, v in kwargs.items()}
         await db.request_log_insert(**kwargs)
     except Exception:
         log.exception("request log insert failed")
@@ -1712,12 +1725,12 @@ async def _admin_grafana_proxy(path: str, request: Request, username: str) -> Re
         raise HTTPException(status_code=502, detail="Grafana upstream unavailable")
 
 
-@app.api_route("/admin/grafana", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+@app.api_route("/admin/grafana", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
 async def admin_grafana_root(request: Request, _user: str = Depends(require_admin_auth)):
     return await _admin_grafana_proxy("", request, _user)
 
 
-@app.api_route("/admin/grafana/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+@app.api_route("/admin/grafana/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
 async def admin_grafana_proxy_path(path: str, request: Request, _user: str = Depends(require_admin_auth)):
     return await _admin_grafana_proxy(path, request, _user)
 
