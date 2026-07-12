@@ -2078,6 +2078,13 @@ async def admin_resolve_fp_report(
     return await resolve_falsepositivereport_case(case_id, body, {"label": _user})
 
 
+class RootScammerBody(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=128)
+    reason: str = Field(..., min_length=1, max_length=2048)
+    report_id: Optional[str] = Field(default=None, max_length=128)  # e.g. "RPT_000000"
+    banned_by_user_id: Optional[str] = Field(default=None, max_length=64)  # Discord user ID (numeric) for MariaDB integer column
+
+
 @app.get("/admin/scammers")
 async def admin_list_scammers(_user: str = Depends(require_admin_auth)):
     """List scammers."""
@@ -2255,13 +2262,6 @@ async def admin_set_prompt(body: AdminPromptBody, request: Request, _user: str =
 # ----------------------------
 # Master key full-access endpoints
 # ----------------------------
-class RootScammerBody(BaseModel):
-    user_id: str = Field(..., min_length=1, max_length=128)
-    reason: str = Field(..., min_length=1, max_length=2048)
-    report_id: Optional[str] = Field(default=None, max_length=128)  # e.g. "RPT_000000"
-    banned_by_user_id: Optional[str] = Field(default=None, max_length=64)  # Discord user ID (numeric) for MariaDB integer column
-
-
 class UrlListBody(BaseModel):
     """Body for adding/updating a URL in the safe/scam list."""
     domain: str = Field(..., min_length=1, max_length=256)
