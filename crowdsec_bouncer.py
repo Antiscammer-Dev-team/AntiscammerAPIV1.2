@@ -12,7 +12,7 @@ import asyncio
 import ipaddress
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Union
 
 import aiohttp
@@ -26,7 +26,17 @@ CROWDSEC_LAPI_URL = (os.getenv("CROWDSEC_LAPI_URL") or "").strip().rstrip("/")
 CROWDSEC_BOUNCER_KEY = (os.getenv("CROWDSEC_BOUNCER_KEY") or "").strip()
 CROWDSEC_POLL_INTERVAL_SEC = max(5, int(os.getenv("CROWDSEC_POLL_INTERVAL_SEC", "15")))
 
+# Bouncer keys can only *read* decisions. Removing one (e.g. to clear a false positive)
+# requires a CrowdSec "machine" credential instead (`cscli machines add <name> --auto`
+# on the CrowdSec host), used to obtain a short-lived JWT for the decisions-delete API.
+CROWDSEC_MACHINE_ID = (os.getenv("CROWDSEC_MACHINE_ID") or "").strip()
+CROWDSEC_MACHINE_PASSWORD = (os.getenv("CROWDSEC_MACHINE_PASSWORD") or "").strip()
+
 ENABLED = bool(CROWDSEC_LAPI_URL and CROWDSEC_BOUNCER_KEY)
+UNBAN_ENABLED = bool(ENABLED and CROWDSEC_MACHINE_ID and CROWDSEC_MACHINE_PASSWORD)
+
+_machine_jwt: Optional[str] = None
+_machine_jwt_expiry: Optional[datetime] = None
 
 _METRIC_BLOCKED_TOTAL = Counter(
     "antiscammer_crowdsec_blocked_total",
@@ -114,6 +124,7 @@ async def _apply_decisions(new: Optional[list], deleted: Optional[list], full_sy
             "scenario": item.get("scenario"),
             "origin": item.get("origin"),
             "duration": item.get("duration"),
+            "decision_id": item.get("id"),
             "until_at": _parse_until(item.get("until")),
         })
 
@@ -132,6 +143,78 @@ async def _apply_decisions(new: Optional[list], deleted: Optional[list], full_sy
 async def get_banned_entries() -> List[Dict[str, Any]]:
     """Currently-active mirrored decisions (for the admin panel), newest-seen first."""
     return await db.crowdsec_bans_get_all()
+
+
+class UnbanError(Exception):
+    """Raised when a CrowdSec decision couldn't be removed upstream."""
+
+
+async def _get_machine_token(session: aiohttp.ClientSession) -> str:
+    global _machine_jwt, _machine_jwt_expiry
+    now = datetime.now(timezone.utc)
+    if _machine_jwt and _machine_jwt_expiry and now < _machine_jwt_expiry:
+        return _machine_jwt
+
+    url = f"{CROWDSEC_LAPI_URL}/v1/watchers/login"
+    try:
+        async with session.post(
+            url, json={"machine_id": CROWDSEC_MACHINE_ID, "password": CROWDSEC_MACHINE_PASSWORD},
+        ) as resp:
+            if resp.status != 200:
+                raise UnbanError(f"CrowdSec machine login failed (HTTP {resp.status})")
+            data = await resp.json(content_type=None)
+    except aiohttp.ClientError as e:
+        raise UnbanError(f"CrowdSec machine login failed: {e}")
+
+    token = data.get("token")
+    if not token:
+        raise UnbanError("CrowdSec machine login response missing token")
+    _machine_jwt = token
+    # Refresh a bit early rather than trusting the server's "expire" down to the second.
+    _machine_jwt_expiry = now + timedelta(hours=1) - timedelta(minutes=5)
+    return token
+
+
+async def unban(session: aiohttp.ClientSession, value: str) -> None:
+    """Remove a decision from CrowdSec itself (not just our local mirror), so it doesn't
+    reappear on the next poll. Requires CROWDSEC_MACHINE_ID/CROWDSEC_MACHINE_PASSWORD —
+    bouncer keys are read-only for decisions."""
+    if not UNBAN_ENABLED:
+        raise UnbanError(
+            "Unban is not configured: set CROWDSEC_MACHINE_ID and CROWDSEC_MACHINE_PASSWORD "
+            "(create one with `cscli machines add <name> --auto` on the CrowdSec host)"
+        )
+
+    ban = await db.crowdsec_ban_get(value)
+    token = await _get_machine_token(session)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    if ban and ban.get("decision_id"):
+        url = f"{CROWDSEC_LAPI_URL}/v1/decisions/{ban['decision_id']}"
+        params = None
+    else:
+        scope = (ban or {}).get("scope") or "Ip"
+        param = "range" if scope.lower() == "range" else "ip"
+        url = f"{CROWDSEC_LAPI_URL}/v1/decisions"
+        params = {param: value}
+
+    try:
+        async with session.delete(url, headers=headers, params=params) as resp:
+            if resp.status not in (200, 404):
+                body = await resp.text()
+                raise UnbanError(f"CrowdSec refused to delete decision (HTTP {resp.status}): {body[:300]}")
+    except aiohttp.ClientError as e:
+        raise UnbanError(f"CrowdSec decisions delete failed: {e}")
+
+    # Drop it locally right away instead of waiting for the next poll's delta.
+    global _banned_networks
+    _banned_ips.discard(value)
+    try:
+        net = ipaddress.ip_network(value, strict=False)
+        _banned_networks = [n for n in _banned_networks if n != net]
+    except ValueError:
+        pass
+    await db.crowdsec_bans_delete_many([value])
 
 
 async def poll_loop(session: aiohttp.ClientSession) -> None:

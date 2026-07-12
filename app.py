@@ -1894,6 +1894,7 @@ async def admin_crowdsec_bans(_user: str = Depends(require_admin_auth)):
     return {
         "ok": True,
         "enabled": crowdsec_bouncer.ENABLED,
+        "unban_enabled": crowdsec_bouncer.UNBAN_ENABLED,
         "count": len(items),
         "items": [
             {
@@ -1910,6 +1911,25 @@ async def admin_crowdsec_bans(_user: str = Depends(require_admin_auth)):
             for i in items
         ],
     }
+
+
+class CrowdsecUnbanBody(BaseModel):
+    value: str = Field(..., min_length=1, max_length=64)
+
+
+@app.post("/admin/crowdsec/bans/unban")
+async def admin_crowdsec_unban(body: CrowdsecUnbanBody, request: Request, _user: str = Depends(require_admin_auth)):
+    """Remove a CrowdSec decision (e.g. to clear a false positive). Deletes it from
+    CrowdSec itself, not just our local mirror, so it doesn't reappear on the next poll."""
+    value = body.value.strip()
+    if not value:
+        raise HTTPException(status_code=400, detail="value required")
+    try:
+        await crowdsec_bouncer.unban(request.app.state.http_session, value)
+    except crowdsec_bouncer.UnbanError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    await _admin_audit(request, _user, "crowdsec_unban", value)
+    return {"ok": True, "value": value}
 
 
 def _parse_log_datetime(value: Optional[str], field: str) -> Optional[datetime]:

@@ -322,11 +322,18 @@ async def init_tables(pool: asyncpg.Pool) -> None:
                 scenario TEXT,
                 origin TEXT,
                 duration TEXT,
+                decision_id BIGINT,
                 until_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
+        try:
+            await conn.execute(
+                'ALTER TABLE "CrowdSec bans" ADD COLUMN IF NOT EXISTS decision_id BIGINT'
+            )
+        except Exception:
+            pass
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_crowdsec_bans_until_at
             ON "CrowdSec bans" (until_at)
@@ -965,14 +972,15 @@ async def crowdsec_bans_replace_all(entries: List[Dict[str, Any]]) -> None:
                 await conn.executemany(
                     """
                     INSERT INTO "CrowdSec bans"
-                        (value, scope, decision_type, scenario, origin, duration, until_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        (value, scope, decision_type, scenario, origin, duration, decision_id, until_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                     ON CONFLICT (value) DO NOTHING
                     """,
                     [
                         (
                             e["value"], e.get("scope") or "Ip", e.get("decision_type") or "ban",
-                            e.get("scenario"), e.get("origin"), e.get("duration"), e.get("until_at"),
+                            e.get("scenario"), e.get("origin"), e.get("duration"),
+                            e.get("decision_id"), e.get("until_at"),
                         )
                         for e in entries
                     ],
@@ -986,17 +994,18 @@ async def crowdsec_bans_upsert_many(entries: List[Dict[str, Any]]) -> None:
     async with pool.acquire() as conn:
         await conn.executemany(
             """
-            INSERT INTO "CrowdSec bans" (value, scope, decision_type, scenario, origin, duration, until_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO "CrowdSec bans" (value, scope, decision_type, scenario, origin, duration, decision_id, until_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (value) DO UPDATE SET
                 scope = EXCLUDED.scope, decision_type = EXCLUDED.decision_type, scenario = EXCLUDED.scenario,
-                origin = EXCLUDED.origin, duration = EXCLUDED.duration, until_at = EXCLUDED.until_at,
-                updated_at = NOW()
+                origin = EXCLUDED.origin, duration = EXCLUDED.duration, decision_id = EXCLUDED.decision_id,
+                until_at = EXCLUDED.until_at, updated_at = NOW()
             """,
             [
                 (
                     e["value"], e.get("scope") or "Ip", e.get("decision_type") or "ban",
-                    e.get("scenario"), e.get("origin"), e.get("duration"), e.get("until_at"),
+                    e.get("scenario"), e.get("origin"), e.get("duration"),
+                    e.get("decision_id"), e.get("until_at"),
                 )
                 for e in entries
             ],
@@ -1021,6 +1030,13 @@ async def crowdsec_bans_get_all(include_expired: bool = False) -> List[Dict[str,
     async with pool.acquire() as conn:
         rows = await conn.fetch(query)
     return [dict(r) for r in rows]
+
+
+async def crowdsec_ban_get(value: str) -> Optional[Dict[str, Any]]:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow('SELECT * FROM "CrowdSec bans" WHERE value = $1', value)
+    return dict(row) if row else None
 
 
 async def admin_audit_log(username: str, action: str, resource: Optional[str] = None, details: Optional[Dict[str, Any]] = None, ip: Optional[str] = None) -> None:

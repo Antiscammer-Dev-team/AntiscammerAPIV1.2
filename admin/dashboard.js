@@ -605,7 +605,9 @@
       const d = await api('GET', '/admin/crowdsec/bans');
       const statusEl = document.getElementById('crowdsecStatus');
       if (statusEl) {
-        statusEl.textContent = d.enabled ? d.count + ' active ban' + (d.count === 1 ? '' : 's') : 'CrowdSec bouncer is disabled';
+        let text = d.enabled ? d.count + ' active ban' + (d.count === 1 ? '' : 's') : 'CrowdSec bouncer is disabled';
+        if (d.enabled && !d.unban_enabled) text += ' (unban not configured: set CROWDSEC_MACHINE_ID/CROWDSEC_MACHINE_PASSWORD)';
+        statusEl.textContent = text;
         statusEl.className = 'msg ' + (d.enabled ? 'ok' : 'err');
       }
       const rows = (d.items || []).map(b => `
@@ -616,9 +618,21 @@
           <td>${esc(b.origin || '')}</td>
           <td>${esc(b.duration || '')}</td>
           <td>${b.until_at ? esc(toLocalISO(b.until_at)) : 'never'}</td>
+          <td>${d.unban_enabled ? `<button class="danger" data-value="${esc(b.value)}" data-action="unban">Unban</button>` : ''}</td>
         </tr>`).join('');
-      document.getElementById('crowdsecBansBody').innerHTML = rows || '<tr><td colspan="6">No active bans.</td></tr>';
-    } catch (e) { document.getElementById('crowdsecBansBody').innerHTML = '<tr><td colspan="6">' + esc(e.message) + '</td></tr>'; }
+      document.getElementById('crowdsecBansBody').innerHTML = rows || '<tr><td colspan="7">No active bans.</td></tr>';
+      document.getElementById('crowdsecBansBody').querySelectorAll('[data-action="unban"]').forEach(btn => {
+        btn.onclick = () => unbanCrowdsec(btn.dataset.value);
+      });
+    } catch (e) { document.getElementById('crowdsecBansBody').innerHTML = '<tr><td colspan="7">' + esc(e.message) + '</td></tr>'; }
+  }
+
+  async function unbanCrowdsec(value) {
+    if (!confirm('Unban ' + value + '? This removes the decision from CrowdSec itself.')) return;
+    try {
+      await api('POST', '/admin/crowdsec/bans/unban', { value });
+      loadCrowdsecBans();
+    } catch (e) { alert(e.message); }
   }
 
   async function loadFpReports() {
