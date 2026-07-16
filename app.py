@@ -529,6 +529,45 @@ async def load_scammers_db() -> None:
         _KNOWN_SCAMMERS = {}
 
 
+async def sync_scammers_from_mariadb() -> int:
+    """Pull any global bans present in MariaDB (main) but missing from Postgres.
+
+    Returns the number of newly-synced rows.
+    """
+    await load_scammers_db()
+
+    synced_from_mariadb = 0
+    maria_bans = await maria_mirror.fetch_all_global_bans()
+    for user_id, reason in maria_bans.items():
+        if user_id not in _KNOWN_SCAMMERS:
+            await db.scammer_upsert(user_id, reason)
+            synced_from_mariadb += 1
+    if synced_from_mariadb:
+        await load_scammers_db()
+    return synced_from_mariadb
+
+
+SCAMMER_SYNC_INTERVAL_SEC = max(5, int(os.getenv("SCAMMER_SYNC_INTERVAL_SEC", "30")))
+SCAMMER_SYNC_ENABLED = bool(maria_mirror is not None and maria_mirror._enabled())
+
+
+async def scammer_sync_poll_loop() -> None:
+    if not SCAMMER_SYNC_ENABLED:
+        log.info("MariaDB scammer sync disabled (MARIADB_* env not fully set)")
+        return
+
+    while True:
+        try:
+            synced = await sync_scammers_from_mariadb()
+            if synced:
+                log.info("Auto-synced %d scammer(s) from MariaDB", synced)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Scammer sync poll failed")
+        await asyncio.sleep(SCAMMER_SYNC_INTERVAL_SEC)
+
+
 async def load_urls_db() -> None:
     global _KNOWN_SAFE_URLS, _KNOWN_SCAM_URLS
     try:
@@ -1057,6 +1096,10 @@ async def lifespan(app: FastAPI):
         log.info("CrowdSec bouncer enabled; polling %s every %ss", crowdsec_bouncer.CROWDSEC_LAPI_URL, crowdsec_bouncer.CROWDSEC_POLL_INTERVAL_SEC)
     else:
         log.info("CrowdSec bouncer disabled (set CROWDSEC_LAPI_URL and CROWDSEC_BOUNCER_KEY to enable)")
+    scammer_sync_task: Optional[asyncio.Task] = None
+    if SCAMMER_SYNC_ENABLED:
+        scammer_sync_task = asyncio.create_task(scammer_sync_poll_loop())
+        log.info("MariaDB scammer sync enabled; polling every %ss", SCAMMER_SYNC_INTERVAL_SEC)
     try:
         yield
     finally:
@@ -1064,6 +1107,12 @@ async def lifespan(app: FastAPI):
             crowdsec_task.cancel()
             try:
                 await crowdsec_task
+            except asyncio.CancelledError:
+                pass
+        if scammer_sync_task:
+            scammer_sync_task.cancel()
+            try:
+                await scammer_sync_task
             except asyncio.CancelledError:
                 pass
         await app.state.http_session.close()
@@ -1816,16 +1865,7 @@ async def admin_delete_key(body: AdminDeleteKeyBody, _user: str = Depends(requir
 
 @app.post("/admin/reload-scammers")
 async def admin_reload_scammers(_user: str = Depends(require_admin_auth)):
-    await load_scammers_db()
-
-    synced_from_mariadb = 0
-    maria_bans = await maria_mirror.fetch_all_global_bans()
-    for user_id, reason in maria_bans.items():
-        if user_id not in _KNOWN_SCAMMERS:
-            await db.scammer_upsert(user_id, reason)
-            synced_from_mariadb += 1
-    if synced_from_mariadb:
-        await load_scammers_db()
+    synced_from_mariadb = await sync_scammers_from_mariadb()
 
     return {
         "ok": True,
