@@ -39,12 +39,14 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Security,
     UploadFile,
     status,
 )
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import APIKeyHeader, HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
@@ -316,7 +318,16 @@ def _generate_api_key() -> str:
     part = lambda: "".join(__import__("random").choices("0123456789ABCDEF", k=4))
     return f"ATSM-{part()}-{part()}-{part()}"
 
-async def require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+# Registered as an OpenAPI security scheme so /docs shows an "Authorize" button
+# that sends the key on every "Try it out" request.
+api_key_header = APIKeyHeader(
+    name="X-API-Key",
+    scheme_name="APIKey",
+    description="Your AntiScammer API key.",
+    auto_error=False,
+)
+
+async def require_api_key(x_api_key: Optional[str] = Security(api_key_header)):
     if not x_api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key")
 
@@ -339,7 +350,7 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None, alias=
     return meta
 
 
-async def require_master_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> str:
+async def require_master_api_key(x_api_key: Optional[str] = Security(api_key_header)) -> str:
     """
     Dependency that ensures the caller is using the configured master API key.
     This bypasses normal per-partner restrictions and is intended only for
@@ -1119,7 +1130,80 @@ async def lifespan(app: FastAPI):
         await db.close_pool()
         log.info("HTTP session closed")
 
-app = FastAPI(title="AntiScammer Local API (Keyed)", lifespan=lifespan)
+# ---------------------------------------------------------------------------
+# OpenAPI / Swagger UI (/docs) metadata
+# ---------------------------------------------------------------------------
+API_TITLE = os.getenv("API_TITLE", "AntiScammer API")
+API_VERSION = os.getenv("API_VERSION", "2026.9.25")
+API_DESCRIPTION = os.getenv(
+    "API_DESCRIPTION",
+    "Welcome to AntiScammer API\n\n"
+    "AntiScammer API for automated scam detection, scammer lookups and URL checks.\n\n"
+    "Most endpoints require an API key sent in the `X-API-Key` header.\n\n"
+    "Website: [antiscammer.app](https://antiscammer.app)",
+)
+API_TERMS_URL = os.getenv("API_TERMS_URL", "https://antiscammer.app/legal").strip() or None
+API_CONTACT_NAME = os.getenv("API_CONTACT_NAME", "Contact AntiScammer Support")
+API_CONTACT_URL = os.getenv("API_CONTACT_URL", "https://antiscammer.app/i/discord").strip()
+API_CONTACT_EMAIL = os.getenv("API_CONTACT_EMAIL", "").strip()
+
+_api_contact: Optional[Dict[str, str]] = None
+if API_CONTACT_URL or API_CONTACT_EMAIL:
+    _api_contact = {"name": API_CONTACT_NAME}
+    if API_CONTACT_URL:
+        _api_contact["url"] = API_CONTACT_URL
+    if API_CONTACT_EMAIL:
+        _api_contact["email"] = API_CONTACT_EMAIL
+
+# Order here is the order sections appear in /docs.
+OPENAPI_TAGS: List[Dict[str, str]] = [
+    {"name": "security", "description": "Scam detection, scammer lookups and URL checks."},
+    {"name": "cases", "description": "Ban requests and false-positive reports."},
+    {"name": "ticket audit", "description": "Ticket audit registration and verification."},
+    {"name": "auth", "description": "Authentication and two-factor setup."},
+    {"name": "status", "description": "Health, readiness and metrics."},
+]
+
+# Path prefix -> tag; first match wins.
+_OPENAPI_TAG_PREFIXES: List[Tuple[str, str]] = [
+    ("/admin", "admin"),
+    ("/root", "master"),
+    ("/staff", "master"),
+    ("/2fa", "auth"),
+    ("/authenticate", "auth"),
+    ("/ready", "status"),
+    ("/health", "status"),
+    ("/metrics", "status"),
+    ("/banrequest", "cases"),
+    ("/falsepositivereport", "cases"),
+    ("/ticket-audit", "ticket audit"),
+    ("/lookup", "security"),
+    ("/url-check", "security"),
+    ("/detect", "security"),
+    ("/canonicalize", "security"),
+]
+_OPENAPI_HIDDEN_PATHS = {
+    "/",
+    "/robots.txt",
+    "/robot.txt",
+    "/metrics",
+    "/banrequest/{case_id}/resolve",
+    "/falsepositivereport/{case_id}/resolve",
+}
+# Internal route groups kept out of the public /docs page.
+_OPENAPI_HIDDEN_TAGS = {"admin", "master"}
+
+app = FastAPI(
+    title=API_TITLE,
+    version=API_VERSION,
+    description=API_DESCRIPTION,
+    terms_of_service=API_TERMS_URL,
+    contact=_api_contact,
+    openapi_tags=OPENAPI_TAGS,
+    # Keep the key entered via "Authorize" across page reloads (stored in the viewer's browser).
+    swagger_ui_parameters={"persistAuthorization": True},
+    lifespan=lifespan,
+)
 
 _admin_dir = Path(__file__).with_name("admin")
 if _admin_dir.exists():
@@ -2639,7 +2723,7 @@ async def staff_global_ban(body: GlobalBanBody, _master: str = Depends(require_m
 async def twofa_setup(
     body: TwoFASetupRequest,
     _meta: dict = Depends(require_api_key),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_api_key: Optional[str] = Security(api_key_header),
 ):
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
@@ -2683,7 +2767,7 @@ async def twofa_setup(
 async def twofa_enable(
     body: TwoFACodeRequest,
     _meta: dict = Depends(require_api_key),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_api_key: Optional[str] = Security(api_key_header),
 ):
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
@@ -2710,7 +2794,7 @@ async def twofa_enable(
 async def twofa_verify(
     body: TwoFACodeRequest,
     _meta: dict = Depends(require_api_key),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_api_key: Optional[str] = Security(api_key_header),
 ):
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
@@ -2733,7 +2817,7 @@ async def twofa_verify(
 async def authenticate_2fa(
     body: TwoFACodeRequest,
     _meta: dict = Depends(require_api_key),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_api_key: Optional[str] = Security(api_key_header),
 ):
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
@@ -2756,7 +2840,7 @@ async def authenticate_2fa(
 async def twofa_status(
     user_id: str,
     _meta: dict = Depends(require_api_key),
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+    x_api_key: Optional[str] = Security(api_key_header),
 ):
     if not x_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
@@ -2879,7 +2963,7 @@ async def ban_request(
 @app.post("/ticket-audit/register")
 async def ticket_audit_register(
     body: TicketAuditRegisterRequest,
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_api_key: str = Security(api_key_header),
     _meta: dict = Depends(require_api_key),
 ):
     await db.ticket_audit_claim_purge_expired()
@@ -2935,7 +3019,7 @@ async def ticket_audit_register(
 @app.post("/ticket-audit/verify")
 async def ticket_audit_verify(
     body: TicketAuditVerifyRequest,
-    x_api_key: str = Header(..., alias="X-API-Key"),
+    x_api_key: str = Security(api_key_header),
     _meta: dict = Depends(require_api_key),
 ):
     await db.ticket_audit_claim_purge_expired()
@@ -3274,3 +3358,28 @@ def robots_txt():
 @app.get("/robot.txt")
 def robots_txt():
     return PlainTextResponse("User-agent: *\nDisallow: /\n")
+
+
+def _apply_openapi_route_metadata() -> None:
+    """Group routes into /docs sections by path prefix, hide internal groups, and use each docstring's first line as its summary."""
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if route.path in _OPENAPI_HIDDEN_PATHS:
+            route.include_in_schema = False
+            continue
+        if not route.tags:
+            for prefix, tag in _OPENAPI_TAG_PREFIXES:
+                if route.path == prefix or route.path.startswith(prefix + "/"):
+                    route.tags = [tag]
+                    break
+        if _OPENAPI_HIDDEN_TAGS.intersection(route.tags):
+            route.include_in_schema = False
+            continue
+        if not route.summary and route.endpoint.__doc__:
+            first_line = route.endpoint.__doc__.strip().splitlines()[0].strip()
+            if first_line:
+                route.summary = first_line
+
+
+_apply_openapi_route_metadata()
