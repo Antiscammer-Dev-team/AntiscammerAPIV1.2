@@ -579,6 +579,66 @@ async def scammer_sync_poll_loop() -> None:
         await asyncio.sleep(SCAMMER_SYNC_INTERVAL_SEC)
 
 
+# Rows this sync creates carry this reason prefix, so it can later remove the ones the
+# site deleted without touching URLs added by hand in the admin panel / master API.
+SITE_SCAM_URL_REASON_PREFIX = "Synced from AntiScammer site"
+
+
+async def sync_scam_urls_from_mariadb() -> Tuple[int, int]:
+    """Mirror host-only scam_urls rows from MariaDB (main) into the "URL list".
+
+    Adds hosts missing from Postgres and removes previously-synced hosts that main no
+    longer lists. Domains already in the list (safe, or scam added by hand) are never
+    overwritten. Returns (added, removed).
+    """
+    site = await maria_mirror.fetch_host_only_scam_urls()
+    if site is None:
+        return 0, 0
+
+    existing = await db.url_list_get_all()
+    to_add = [
+        (domain, f"{SITE_SCAM_URL_REASON_PREFIX} ({source})")
+        for domain, source in site.items()
+        if domain not in existing
+    ]
+    # An empty result is far more likely a bad read/misconfig than the site wiping its
+    # whole list, so never prune on it.
+    to_remove = [
+        domain
+        for domain, meta in existing.items()
+        if site
+        and domain not in site
+        and meta.get("type") == "scam"
+        and (meta.get("reason") or "").startswith(SITE_SCAM_URL_REASON_PREFIX)
+    ]
+
+    await db.url_list_insert_scam_many(to_add)
+    await db.url_list_delete_many(to_remove)
+    if to_add or to_remove:
+        await load_urls_db()
+    return len(to_add), len(to_remove)
+
+
+URL_SYNC_INTERVAL_SEC = max(5, int(os.getenv("URL_SYNC_INTERVAL_SEC", "30")))
+
+
+async def url_sync_poll_loop() -> None:
+    if not SCAMMER_SYNC_ENABLED:
+        log.info("MariaDB scam URL sync disabled (MARIADB_* env not fully set)")
+        return
+
+    while True:
+        try:
+            added, removed = await sync_scam_urls_from_mariadb()
+            if added or removed:
+                log.info("Auto-synced scam URLs from MariaDB: +%d -%d", added, removed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Scam URL sync poll failed")
+        await asyncio.sleep(URL_SYNC_INTERVAL_SEC)
+
+
 async def load_urls_db() -> None:
     global _KNOWN_SAFE_URLS, _KNOWN_SCAM_URLS
     try:
@@ -1111,6 +1171,10 @@ async def lifespan(app: FastAPI):
     if SCAMMER_SYNC_ENABLED:
         scammer_sync_task = asyncio.create_task(scammer_sync_poll_loop())
         log.info("MariaDB scammer sync enabled; polling every %ss", SCAMMER_SYNC_INTERVAL_SEC)
+    url_sync_task: Optional[asyncio.Task] = None
+    if SCAMMER_SYNC_ENABLED:
+        url_sync_task = asyncio.create_task(url_sync_poll_loop())
+        log.info("MariaDB scam URL sync enabled; polling every %ss", URL_SYNC_INTERVAL_SEC)
     try:
         yield
     finally:
@@ -1124,6 +1188,12 @@ async def lifespan(app: FastAPI):
             scammer_sync_task.cancel()
             try:
                 await scammer_sync_task
+            except asyncio.CancelledError:
+                pass
+        if url_sync_task:
+            url_sync_task.cancel()
+            try:
+                await url_sync_task
             except asyncio.CancelledError:
                 pass
         await app.state.http_session.close()
@@ -2006,9 +2076,18 @@ async def admin_delete_url(domain: str, request: Request, _user: str = Depends(r
 
 @app.post("/admin/reload-urls")
 async def admin_reload_urls(_user: str = Depends(require_admin_auth)):
-    """Reload URL cache from DB."""
+    """Pull scam URLs from MariaDB, then reload URL cache from DB."""
+    added, removed = (0, 0)
+    if SCAMMER_SYNC_ENABLED:
+        added, removed = await sync_scam_urls_from_mariadb()
     await load_urls_db()
-    return {"ok": True, "safe_count": len(_KNOWN_SAFE_URLS), "scam_count": len(_KNOWN_SCAM_URLS)}
+    return {
+        "ok": True,
+        "safe_count": len(_KNOWN_SAFE_URLS),
+        "scam_count": len(_KNOWN_SCAM_URLS),
+        "synced_from_mariadb": added,
+        "removed_from_mariadb": removed,
+    }
 
 
 @app.get("/admin/crowdsec/bans")

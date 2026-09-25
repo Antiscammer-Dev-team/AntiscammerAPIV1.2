@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Optional
 
 import aiomysql
@@ -184,3 +185,63 @@ async def mirror_global_ban_delete(user_id: str) -> None:
   except Exception:
       log.exception("MariaDB global_bans delete failed: user_id=%s", user_id)
 
+
+# A host label chain like evil.example.com (or an IPv4 address); no scheme/path/port.
+_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
+
+
+def _scam_url_host(value: str) -> Optional[str]:
+  """
+  Reduce a scam_urls value to a bare host, or None if it isn't host-only.
+
+  The API's "URL list" is keyed by domain, so a value with a path (e.g. a phishing page
+  hosted on docs.google.com) must NOT be collapsed to its host - that would flag the
+  whole shared domain as a scam.
+  """
+  v = (value or "").strip().lower()
+  v = re.sub(r"^[a-z][a-z0-9+.-]*://", "", v)
+  v = v.rstrip("/")
+  if any(c in v for c in "/?#"):
+      return None
+  v = v.rsplit("@", 1)[-1].split(":", 1)[0]
+  if v.startswith("www."):
+      v = v[4:]
+  if len(v) > 253 or not _HOST_RE.match(v):
+      return None
+  return v
+
+
+async def fetch_host_only_scam_urls() -> Optional[dict[str, str]]:
+  """
+  Return {host: source} for every host-only row in MariaDB scam_urls (entries with a
+  path are skipped, see _scam_url_host). Returns None if mirroring isn't configured or
+  the query fails, so callers can tell "no rows" apart from "couldn't read".
+  """
+  if not _enabled():
+      return None
+
+  pool = await _get_pool()
+  if pool is None:
+      return None
+
+  try:
+      async with pool.acquire() as conn:
+          async with conn.cursor() as cur:
+              # Pre-filter in SQL so path-bearing feed URLs (the bulk of the table)
+              # never leave MariaDB; _scam_url_host re-checks each row.
+              await cur.execute(
+                  "SELECT value, source FROM scam_urls "
+                  "WHERE value NOT LIKE %s OR value REGEXP %s",
+                  ("%/%", "^[a-z][a-z0-9+.-]*://[^/?#]+/?$"),
+              )
+              rows = await cur.fetchall()
+  except Exception:
+      log.exception("MariaDB scam_urls fetch failed")
+      return None
+
+  out: dict[str, str] = {}
+  for value, source in rows:
+      host = _scam_url_host(str(value))
+      if host:
+          out.setdefault(host, str(source or "manual"))
+  return out

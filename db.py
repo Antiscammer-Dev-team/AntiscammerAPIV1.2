@@ -960,6 +960,35 @@ async def url_list_delete(domain: str) -> None:
         )
 
 
+async def url_list_insert_scam_many(entries: List[tuple]) -> None:
+    """Insert (domain, reason) scam rows; existing domains (safe or scam) are left untouched."""
+    if not entries:
+        return
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO "URL list" (url_domain, type, reason, created_at)
+            VALUES ($1, 'scam', $2, $3)
+            ON CONFLICT (url_domain) DO NOTHING
+            """,
+            [(d.lower().strip(), r or "", now) for d, r in entries],
+        )
+
+
+async def url_list_delete_many(domains: List[str]) -> None:
+    """Delete several URL rows by domain."""
+    if not domains:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            'DELETE FROM "URL list" WHERE url_domain = ANY($1::text[])',
+            [d.lower().strip() for d in domains],
+        )
+
+
 async def crowdsec_bans_replace_all(entries: List[Dict[str, Any]]) -> None:
     """Wipe and bulk-repopulate the CrowdSec ban mirror. Used on bouncer startup sync,
     since a full decisions snapshot from the LAPI is the only reliable source of truth
