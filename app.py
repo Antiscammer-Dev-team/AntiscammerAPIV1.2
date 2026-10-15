@@ -11,6 +11,8 @@ import re
 import sys
 import time
 import traceback
+import secrets
+import string
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -1143,6 +1145,28 @@ class TicketAuditVerifyRequest(BaseModel):
 # ----------------------------
 # FastAPI app + middleware
 # ----------------------------
+CROWDSEC_BLOCK_STATUS = 900
+_CROWDSEC_NOISE_ALPHABET = string.ascii_letters + string.digits + string.punctuation
+
+
+def _allow_nonstandard_status(code: int, phrase: str) -> None:
+    """Uvicorn precomputes status lines only for 100-599 and raises KeyError on anything
+    else, which would turn our response into a 500. Register the extra code up front."""
+    try:
+        from uvicorn.protocols.http import httptools_impl
+        httptools_impl.STATUS_LINE[code] = f"HTTP/1.1 {code} {phrase}\r\n".encode()
+    except Exception:
+        pass
+    try:
+        from uvicorn.protocols.http import h11_impl
+        h11_impl.STATUS_PHRASES[code] = phrase.encode()
+    except Exception:
+        pass
+
+
+_allow_nonstandard_status(CROWDSEC_BLOCK_STATUS, "Rejected")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _startup_time
@@ -1537,18 +1561,22 @@ async def request_id_and_timing_middleware(request: Request, call_next):
 
     if crowdsec_bouncer.is_banned(client_ip):
         crowdsec_bouncer.record_block()
+        body = (
+            "Rejected get out of here scanner "
+            + "".join(secrets.choice(_CROWDSEC_NOISE_ALPHABET) for _ in range(256))
+        ).encode()
         _emit_crowdsec_access_log(
             client_ip=client_ip,
             admin_username=None,
             method=method,
             path=path,
             query_string=query_string,
-            status_code=403,
-            response_bytes=0,
+            status_code=CROWDSEC_BLOCK_STATUS,
+            response_bytes=len(body),
             referer=request.headers.get("referer"),
             user_agent=request.headers.get("user-agent"),
         )
-        response = JSONResponse(status_code=403, content={"detail": "Forbidden", "request_id": request_id})
+        response = PlainTextResponse(body, status_code=CROWDSEC_BLOCK_STATUS)
         response.headers["X-Request-ID"] = request_id
         return response
 
