@@ -191,7 +191,13 @@ async def _get_machine_token(session: aiohttp.ClientSession) -> str:
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
-                raise CrowdsecWriteError(f"CrowdSec machine login failed (HTTP {resp.status}): {body[:300]}")
+                # TEMP diagnostic for a 401: describe what we sent without revealing the password.
+                pw = CROWDSEC_MACHINE_PASSWORD
+                raise CrowdsecWriteError(
+                    f"CrowdSec machine login failed (HTTP {resp.status}): {body[:300]} "
+                    f"[sent id={CROWDSEC_MACHINE_ID!r} pw_len={len(pw)} "
+                    f"pw_alnum_only={pw.isalnum()} url={url!r}]"
+                )
             data = await resp.json(content_type=None)
     except aiohttp.ClientError as e:
         raise CrowdsecWriteError(f"CrowdSec machine login failed: {e}")
