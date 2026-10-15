@@ -187,17 +187,15 @@ async def _get_machine_token(session: aiohttp.ClientSession) -> str:
     url = f"{CROWDSEC_LAPI_URL}/v1/watchers/login"
     try:
         async with session.post(
-            url, json={"machine_id": CROWDSEC_MACHINE_ID, "password": CROWDSEC_MACHINE_PASSWORD},
+            url,
+            json={"machine_id": CROWDSEC_MACHINE_ID, "password": CROWDSEC_MACHINE_PASSWORD},
+            # LAPI splits the User-Agent on "/" and rejects login ("incorrect Username or
+            # Password") unless it gets exactly name/version; aiohttp's default has two slashes.
+            headers={"User-Agent": "antiscammer-api/v1.2"},
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
-                # TEMP diagnostic for a 401: describe what we sent without revealing the password.
-                pw = CROWDSEC_MACHINE_PASSWORD
-                raise CrowdsecWriteError(
-                    f"CrowdSec machine login failed (HTTP {resp.status}): {body[:300]} "
-                    f"[sent id={CROWDSEC_MACHINE_ID!r} pw_len={len(pw)} "
-                    f"pw_alnum_only={pw.isalnum()} url={url!r}]"
-                )
+                raise CrowdsecWriteError(f"CrowdSec machine login failed (HTTP {resp.status}): {body[:300]}")
             data = await resp.json(content_type=None)
     except aiohttp.ClientError as e:
         raise CrowdsecWriteError(f"CrowdSec machine login failed: {e}")
