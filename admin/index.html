@@ -218,6 +218,24 @@
           <div id="tabCrowdsec" class="tab-panel">
             <div class="page-head"><h1>CrowdSec</h1><p class="page-sub">IPs and ranges currently banned via the CrowdSec decision stream.</p></div>
             <section class="panel">
+              <h2>Ban IP</h2>
+              <div class="form-row">
+                <label>IP / Range</label>
+                <input type="text" id="newBanValue" placeholder="203.0.113.7 or 203.0.113.0/24">
+              </div>
+              <div class="form-row">
+                <label>Duration</label>
+                <input type="text" id="newBanDuration" value="4h" placeholder="30m, 4h, 7d" size="8">
+              </div>
+              <div class="form-row">
+                <label>Reason</label>
+                <input type="text" id="newBanReason" placeholder="Optional reason">
+                <button type="button" class="danger" id="btnBanIp">Ban</button>
+              </div>
+              <p class="page-sub">Manual bans block everything except /admin, so you can't lock yourself out.</p>
+              <div id="banIpMsg" class="msg"></div>
+            </section>
+            <section class="panel">
               <div class="toolbar-row">
                 <span id="crowdsecStatus" class="msg"></span>
                 <button type="button" id="btnLoadCrowdsecBans">Refresh</button>

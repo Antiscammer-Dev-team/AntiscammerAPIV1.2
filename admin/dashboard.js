@@ -606,7 +606,7 @@
       const statusEl = document.getElementById('crowdsecStatus');
       if (statusEl) {
         let text = d.enabled ? d.count + ' active ban' + (d.count === 1 ? '' : 's') : 'CrowdSec bouncer is disabled';
-        if (d.enabled && !d.unban_enabled) text += ' (unban not configured: set CROWDSEC_MACHINE_ID/CROWDSEC_MACHINE_PASSWORD)';
+        if (d.enabled && !d.unban_enabled) text += ' (ban/unban not configured: set CROWDSEC_MACHINE_ID/CROWDSEC_MACHINE_PASSWORD)';
         statusEl.textContent = text;
         statusEl.className = 'msg ' + (d.enabled ? 'ok' : 'err');
       }
@@ -805,6 +805,20 @@
   document.getElementById('fpReportStatus')?.addEventListener('change', () => loadFpReports());
 
   document.getElementById('btnLoadCrowdsecBans')?.addEventListener('click', () => loadCrowdsecBans());
+
+  document.getElementById('btnBanIp')?.addEventListener('click', async () => {
+    const value = document.getElementById('newBanValue').value.trim();
+    const duration = document.getElementById('newBanDuration').value.trim() || '4h';
+    const reason = document.getElementById('newBanReason').value.trim();
+    if (!value) { showMsg('banIpMsg', 'Enter an IP or range.', false); return; }
+    try {
+      const d = await api('POST', '/admin/crowdsec/bans/ban', { value, duration, reason });
+      document.getElementById('newBanValue').value = '';
+      document.getElementById('newBanReason').value = '';
+      loadCrowdsecBans();
+      showMsg('banIpMsg', 'Banned ' + d.value + ' for ' + d.duration + '.', true);
+    } catch (e) { showMsg('banIpMsg', e.message, false); }
+  });
 
   document.getElementById('btnSetMaster')?.addEventListener('click', async () => {
     const key = document.getElementById('masterKeyInput').value.trim();

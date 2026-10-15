@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import collections
+import ipaddress
 import json
 import logging
 import os
@@ -1559,7 +1560,9 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     endpoint_name = _resolve_endpoint_name(method, path)
     client_ip = _get_client_ip(request)
 
-    if crowdsec_bouncer.is_banned(client_ip):
+    ban_kind = crowdsec_bouncer.ban_kind(client_ip)
+    is_admin_path = path == "/admin" or path.startswith("/admin/")
+    if ban_kind == "auto" or (ban_kind == "manual" and not is_admin_path):
         crowdsec_bouncer.record_block()
         body = (
             "Rejected get out of here scanner "
@@ -2144,6 +2147,49 @@ async def admin_crowdsec_bans(_user: str = Depends(require_admin_auth)):
     }
 
 
+class CrowdsecBanBody(BaseModel):
+    value: str = Field(..., min_length=1, max_length=64, description="IP address or CIDR range")
+    duration: str = Field("4h", max_length=16, description="e.g. 30m, 4h, 7d")
+    reason: str = Field("", max_length=200)
+
+
+_BAN_DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$")
+
+
+def _normalize_ban_duration(raw: str) -> str:
+    """Accept 7d/4h/30m/10s (and combos); CrowdSec's LAPI takes Go durations, which have no
+    days unit, so days are folded into hours."""
+    m = _BAN_DURATION_RE.match(raw.strip().lower())
+    if not raw.strip() or not m or not any(m.groups()):
+        raise HTTPException(status_code=400, detail="duration must look like 30m, 4h or 7d")
+    d, h, mi, sec = (int(g or 0) for g in m.groups())
+    hours = d * 24 + h
+    out = (f"{hours}h" if hours else "") + (f"{mi}m" if mi else "") + (f"{sec}s" if sec else "")
+    return out or "0s"
+
+
+@app.post("/admin/crowdsec/bans/ban")
+async def admin_crowdsec_ban(body: CrowdsecBanBody, request: Request, _user: str = Depends(require_admin_auth)):
+    """Manually ban an IP or range. The decision is added to CrowdSec itself (origin
+    "cscli"), so it shows up alongside automatic bans and survives restarts. Manual bans
+    are not enforced on /admin, so a mistaken one can't lock admins out."""
+    value = body.value.strip()
+    try:
+        ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="value must be an IP address or CIDR range")
+    duration = _normalize_ban_duration(body.duration or "4h")
+    if duration == "0s":
+        raise HTTPException(status_code=400, detail="duration must be greater than zero")
+    reason = re.sub(r"[\x00-\x1f\x7f]", " ", body.reason or "").strip()
+    try:
+        await crowdsec_bouncer.ban(request.app.state.http_session, value, duration, reason)
+    except crowdsec_bouncer.CrowdsecWriteError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    await _admin_audit(request, _user, "crowdsec_ban", value, {"duration": duration, "reason": reason})
+    return {"ok": True, "value": value, "duration": duration}
+
+
 class CrowdsecUnbanBody(BaseModel):
     value: str = Field(..., min_length=1, max_length=64)
 
@@ -2157,7 +2203,7 @@ async def admin_crowdsec_unban(body: CrowdsecUnbanBody, request: Request, _user:
         raise HTTPException(status_code=400, detail="value required")
     try:
         await crowdsec_bouncer.unban(request.app.state.http_session, value)
-    except crowdsec_bouncer.UnbanError as e:
+    except crowdsec_bouncer.CrowdsecWriteError as e:
         raise HTTPException(status_code=502, detail=str(e))
     await _admin_audit(request, _user, "crowdsec_unban", value)
     return {"ok": True, "value": value}

@@ -55,23 +55,47 @@ _banned_ips: Set[str] = set()
 _banned_networks: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
 _stream_started = False
 
+# Decisions made by hand (cscli or the admin panel) rather than by a detection scenario.
+# These don't apply to /admin, so a mistaken manual ban can't lock admins out.
+MANUAL_ORIGINS = {"cscli"}
+_manual_values: Set[str] = set()
+
 
 def record_block() -> None:
     _METRIC_BLOCKED_TOTAL.inc()
 
 
-def is_banned(ip: str) -> bool:
+def ban_kind(ip: str) -> Optional[str]:
+    """"auto" if any scenario-driven decision covers ip, "manual" if only manual
+    decisions do, None if it isn't banned."""
     if not ENABLED or not ip:
-        return False
+        return None
+    matches: List[str] = []
     if ip in _banned_ips:
-        return True
-    if not _banned_networks:
-        return False
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return False
-    return any(addr in net for net in _banned_networks)
+        matches.append(ip)
+    if _banned_networks:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            addr = None
+        if addr is not None:
+            matches.extend(str(net) for net in _banned_networks if addr in net)
+    if not matches:
+        return None
+    return "manual" if all(m in _manual_values for m in matches) else "auto"
+
+
+def is_banned(ip: str) -> bool:
+    return ban_kind(ip) is not None
+
+
+def _decision_key(value: str) -> str:
+    if "/" in value:
+        try:
+            return str(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            pass
+    return value
 
 
 def _parse_until(value: Optional[str]) -> Optional[datetime]:
@@ -94,6 +118,7 @@ async def _apply_decisions(new: Optional[list], deleted: Optional[list], full_sy
         if not value:
             continue
         deleted_values.append(value)
+        _manual_values.discard(_decision_key(value))
         if "/" in value:
             try:
                 net = ipaddress.ip_network(value, strict=False)
@@ -117,6 +142,10 @@ async def _apply_decisions(new: Optional[list], deleted: Optional[list], full_sy
                 continue
         else:
             _banned_ips.add(value)
+        if (item.get("origin") or "").lower() in MANUAL_ORIGINS:
+            _manual_values.add(_decision_key(value))
+        else:
+            _manual_values.discard(_decision_key(value))
         upsert_entries.append({
             "value": value,
             "scope": item.get("scope") or "Ip",
@@ -145,8 +174,8 @@ async def get_banned_entries() -> List[Dict[str, Any]]:
     return await db.crowdsec_bans_get_all()
 
 
-class UnbanError(Exception):
-    """Raised when a CrowdSec decision couldn't be removed upstream."""
+class CrowdsecWriteError(Exception):
+    """Raised when a CrowdSec decision couldn't be added or removed upstream."""
 
 
 async def _get_machine_token(session: aiohttp.ClientSession) -> str:
@@ -161,18 +190,78 @@ async def _get_machine_token(session: aiohttp.ClientSession) -> str:
             url, json={"machine_id": CROWDSEC_MACHINE_ID, "password": CROWDSEC_MACHINE_PASSWORD},
         ) as resp:
             if resp.status != 200:
-                raise UnbanError(f"CrowdSec machine login failed (HTTP {resp.status})")
+                raise CrowdsecWriteError(f"CrowdSec machine login failed (HTTP {resp.status})")
             data = await resp.json(content_type=None)
     except aiohttp.ClientError as e:
-        raise UnbanError(f"CrowdSec machine login failed: {e}")
+        raise CrowdsecWriteError(f"CrowdSec machine login failed: {e}")
 
     token = data.get("token")
     if not token:
-        raise UnbanError("CrowdSec machine login response missing token")
+        raise CrowdsecWriteError("CrowdSec machine login response missing token")
     _machine_jwt = token
     # Refresh a bit early rather than trusting the server's "expire" down to the second.
     _machine_jwt_expiry = now + timedelta(hours=1) - timedelta(minutes=5)
     return token
+
+
+_WRITE_NOT_CONFIGURED = (
+    "set CROWDSEC_MACHINE_ID and CROWDSEC_MACHINE_PASSWORD "
+    "(create one with `cscli machines add <name> --auto` on the CrowdSec host)"
+)
+
+
+async def ban(session: aiohttp.ClientSession, value: str, duration: str, reason: str) -> None:
+    """Add a manual ban decision to CrowdSec (via the alerts API, like `cscli decisions add`),
+    so it is enforced everywhere CrowdSec is, and apply it locally right away."""
+    if not UNBAN_ENABLED:
+        raise CrowdsecWriteError("Manual ban is not configured: " + _WRITE_NOT_CONFIGURED)
+
+    net = ipaddress.ip_network(value, strict=False)
+    is_range = "/" in value
+    scope = "Range" if is_range else "Ip"
+    value = str(net) if is_range else str(net.network_address)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    scenario = f"manual 'ban' from admin panel: {reason}" if reason else "manual 'ban' from admin panel"
+    alert = {
+        "scenario": scenario,
+        "scenario_hash": "",
+        "scenario_version": "",
+        "message": scenario,
+        "events_count": 1,
+        "events": [],
+        "start_at": now,
+        "stop_at": now,
+        "capacity": 0,
+        "leakspeed": "0",
+        "simulated": False,
+        "remediation": True,
+        "source": {"scope": scope, "value": value, "ip": "" if is_range else value, "range": value if is_range else ""},
+        "decisions": [{
+            "duration": duration,
+            "origin": "cscli",
+            "scenario": scenario,
+            "scope": scope,
+            "type": "ban",
+            "value": value,
+        }],
+    }
+
+    token = await _get_machine_token(session)
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        async with session.post(f"{CROWDSEC_LAPI_URL}/v1/alerts", headers=headers, json=[alert]) as resp:
+            if resp.status not in (200, 201):
+                body = await resp.text()
+                raise CrowdsecWriteError(f"CrowdSec refused to add decision (HTTP {resp.status}): {body[:300]}")
+    except aiohttp.ClientError as e:
+        raise CrowdsecWriteError(f"CrowdSec alerts create failed: {e}")
+
+    # Enforce immediately; the next poll delta will fill in decision_id/until from LAPI.
+    await _apply_decisions(
+        [{"value": value, "scope": scope, "type": "ban", "scenario": scenario, "origin": "cscli", "duration": duration}],
+        None,
+        False,
+    )
 
 
 async def unban(session: aiohttp.ClientSession, value: str) -> None:
@@ -180,10 +269,7 @@ async def unban(session: aiohttp.ClientSession, value: str) -> None:
     reappear on the next poll. Requires CROWDSEC_MACHINE_ID/CROWDSEC_MACHINE_PASSWORD —
     bouncer keys are read-only for decisions."""
     if not UNBAN_ENABLED:
-        raise UnbanError(
-            "Unban is not configured: set CROWDSEC_MACHINE_ID and CROWDSEC_MACHINE_PASSWORD "
-            "(create one with `cscli machines add <name> --auto` on the CrowdSec host)"
-        )
+        raise CrowdsecWriteError("Unban is not configured: " + _WRITE_NOT_CONFIGURED)
 
     ban = await db.crowdsec_ban_get(value)
     token = await _get_machine_token(session)
@@ -202,13 +288,14 @@ async def unban(session: aiohttp.ClientSession, value: str) -> None:
         async with session.delete(url, headers=headers, params=params) as resp:
             if resp.status not in (200, 404):
                 body = await resp.text()
-                raise UnbanError(f"CrowdSec refused to delete decision (HTTP {resp.status}): {body[:300]}")
+                raise CrowdsecWriteError(f"CrowdSec refused to delete decision (HTTP {resp.status}): {body[:300]}")
     except aiohttp.ClientError as e:
-        raise UnbanError(f"CrowdSec decisions delete failed: {e}")
+        raise CrowdsecWriteError(f"CrowdSec decisions delete failed: {e}")
 
     # Drop it locally right away instead of waiting for the next poll's delta.
     global _banned_networks
     _banned_ips.discard(value)
+    _manual_values.discard(_decision_key(value))
     try:
         net = ipaddress.ip_network(value, strict=False)
         _banned_networks = [n for n in _banned_networks if n != net]
