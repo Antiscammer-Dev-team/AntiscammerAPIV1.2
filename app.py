@@ -1147,7 +1147,41 @@ class TicketAuditVerifyRequest(BaseModel):
 # FastAPI app + middleware
 # ----------------------------
 CROWDSEC_BLOCK_STATUS = 900
+CROWDSEC_BLOCK_BODY_LEN = 3000  # total chars: message + random noise
 _CROWDSEC_NOISE_ALPHABET = string.ascii_letters + string.digits + string.punctuation
+_CROWDSEC_BLOCK_PREFIX = "Rejected get out of here scanner "
+
+# Tarpit: drip the block body out slowly so a flagged scanner sits on an open connection
+# instead of moving on. Keep the duration under the reverse proxy's timeouts (Traefik /
+# Cloudflare), and cap concurrency so a flood of banned clients can't pile up; over the
+# cap, banned clients get the full body instantly.
+CROWDSEC_TARPIT_SECONDS = max(0, int(os.getenv("CROWDSEC_TARPIT_SECONDS", "60")))
+CROWDSEC_TARPIT_MAX_CONCURRENT = max(0, int(os.getenv("CROWDSEC_TARPIT_MAX_CONCURRENT", "100")))
+_crowdsec_tarpits_active = 0
+
+
+def _crowdsec_noise(n: int) -> str:
+    return "".join(secrets.choice(_CROWDSEC_NOISE_ALPHABET) for _ in range(n))
+
+
+async def _crowdsec_tarpit_body():
+    """Send the message right away, then the noise in even slices once a second."""
+    global _crowdsec_tarpits_active
+    # Counted from the first byte: if the client vanishes before streaming starts, the
+    # generator never runs, so incrementing earlier would leak a slot.
+    _crowdsec_tarpits_active += 1
+    try:
+        yield _CROWDSEC_BLOCK_PREFIX.encode()
+        remaining = CROWDSEC_BLOCK_BODY_LEN - len(_CROWDSEC_BLOCK_PREFIX)
+        ticks = max(1, CROWDSEC_TARPIT_SECONDS)
+        for tick in range(ticks):
+            await asyncio.sleep(1)
+            n = remaining // (ticks - tick)
+            remaining -= n
+            if n:
+                yield _crowdsec_noise(n).encode()
+    finally:
+        _crowdsec_tarpits_active -= 1
 
 
 def _allow_nonstandard_status(code: int, phrase: str) -> None:
@@ -1564,10 +1598,6 @@ async def request_id_and_timing_middleware(request: Request, call_next):
     is_admin_path = path == "/admin" or path.startswith("/admin/")
     if ban_kind == "auto" or (ban_kind == "manual" and not is_admin_path):
         crowdsec_bouncer.record_block()
-        body = (
-            "Rejected get out of here scanner "
-            + "".join(secrets.choice(_CROWDSEC_NOISE_ALPHABET) for _ in range(256))
-        ).encode()
         _emit_crowdsec_access_log(
             client_ip=client_ip,
             admin_username=None,
@@ -1575,11 +1605,20 @@ async def request_id_and_timing_middleware(request: Request, call_next):
             path=path,
             query_string=query_string,
             status_code=CROWDSEC_BLOCK_STATUS,
-            response_bytes=len(body),
+            response_bytes=CROWDSEC_BLOCK_BODY_LEN,
             referer=request.headers.get("referer"),
             user_agent=request.headers.get("user-agent"),
         )
-        response = PlainTextResponse(body, status_code=CROWDSEC_BLOCK_STATUS)
+        if CROWDSEC_TARPIT_SECONDS and _crowdsec_tarpits_active < CROWDSEC_TARPIT_MAX_CONCURRENT:
+            response = StreamingResponse(
+                _crowdsec_tarpit_body(),
+                status_code=CROWDSEC_BLOCK_STATUS,
+                media_type="text/plain; charset=utf-8",
+                headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
+            )
+        else:
+            body = _CROWDSEC_BLOCK_PREFIX + _crowdsec_noise(CROWDSEC_BLOCK_BODY_LEN - len(_CROWDSEC_BLOCK_PREFIX))
+            response = PlainTextResponse(body, status_code=CROWDSEC_BLOCK_STATUS)
         response.headers["X-Request-ID"] = request_id
         return response
 
