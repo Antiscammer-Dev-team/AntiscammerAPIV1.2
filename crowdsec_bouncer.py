@@ -190,7 +190,8 @@ async def _get_machine_token(session: aiohttp.ClientSession) -> str:
             url, json={"machine_id": CROWDSEC_MACHINE_ID, "password": CROWDSEC_MACHINE_PASSWORD},
         ) as resp:
             if resp.status != 200:
-                raise CrowdsecWriteError(f"CrowdSec machine login failed (HTTP {resp.status})")
+                body = await resp.text()
+                raise CrowdsecWriteError(f"CrowdSec machine login failed (HTTP {resp.status}): {body[:300]}")
             data = await resp.json(content_type=None)
     except aiohttp.ClientError as e:
         raise CrowdsecWriteError(f"CrowdSec machine login failed: {e}")
